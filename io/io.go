@@ -4,7 +4,7 @@ import (
 	"io"
 	"iter"
 
-	"github.com/Tangerg/lynx/pkg/slices"
+	"github.com/Tangerg/pkg/slices"
 )
 
 // defaultBufSize is used when the caller does not provide bufSize or

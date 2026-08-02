@@ -5,7 +5,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/Tangerg/lynx/pkg/assert"
+	"github.com/Tangerg/pkg/assert"
 )
 
 const (

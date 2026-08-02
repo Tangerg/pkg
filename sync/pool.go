@@ -7,7 +7,7 @@ import (
 	"github.com/panjf2000/ants/v2"
 	conc "github.com/sourcegraph/conc/pool"
 
-	"github.com/Tangerg/lynx/pkg/safe"
+	"github.com/Tangerg/pkg/safe"
 )
 
 // Pool runs functions concurrently. Implementations may impose limits

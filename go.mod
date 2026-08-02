@@ -1,4 +1,4 @@
-module github.com/Tangerg/lynx/pkg
+module github.com/Tangerg/pkg
 
 go 1.26.5
 

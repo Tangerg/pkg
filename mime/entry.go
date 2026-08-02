@@ -8,8 +8,8 @@ import (
 
 	"github.com/gabriel-vasile/mimetype"
 
-	"github.com/Tangerg/lynx/pkg/assert"
-	"github.com/Tangerg/lynx/pkg/maps"
+	"github.com/Tangerg/pkg/assert"
+	"github.com/Tangerg/pkg/maps"
 )
 
 // Category prototypes used by the Is* helpers; only their type and

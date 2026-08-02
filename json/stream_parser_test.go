@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Tangerg/lynx/pkg/random"
+	"github.com/Tangerg/pkg/random"
 )
 
 // TestStreamParserConfig_Validate tests configuration validation.

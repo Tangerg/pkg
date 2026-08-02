@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Tangerg/lynx/pkg/maps"
+	"github.com/Tangerg/pkg/maps"
 )
 
 // TestInit tests the initialization of tokenBitSet

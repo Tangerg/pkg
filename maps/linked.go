@@ -4,7 +4,7 @@ import (
 	"iter"
 	"reflect"
 
-	pkgSlices "github.com/Tangerg/lynx/pkg/slices"
+	pkgSlices "github.com/Tangerg/pkg/slices"
 )
 
 // mapNode represents a node in the doubly-linked list for LinkedMap.

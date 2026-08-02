@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/Tangerg/lynx/pkg/maps"
+	"github.com/Tangerg/pkg/maps"
 )
 
 const (

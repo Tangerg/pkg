@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Tangerg/lynx/pkg/ptr"
+	"github.com/Tangerg/pkg/ptr"
 )
 
 // =============================================================================

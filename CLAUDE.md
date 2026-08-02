@@ -1,14 +1,14 @@
-# CLAUDE.md — pkg module
+# CLAUDE.md — pkg
 
-> monorepo 的**工具层基础设施**:generics 集合、并发原语、流式处理、JSON Schema 生成等。core / agent / models / vectorstores 都依赖 pkg,**pkg 不依赖任何业务模块** —— 这是 zero-cycle 的关键护栏。
-> 项目级法则见 [`../CLAUDE.md`](../CLAUDE.md)。子包名录 / 调用方数 / 依赖版本以代码为准 —— 本则只讲宏观。
+> 独立的 Go 通用工具库：generics 集合、并发原语、流式处理、JSON Schema 生成等。pkg 不依赖任何业务模块，这是 zero-cycle 的关键护栏。
+> 子包名录与依赖版本以代码为准，本则只讲宏观。
 
 ---
 
 ## 定位
 
-- **纯工具,零业务**:pkg 是 DAG 的底,只放跨业务模块可复用的通用原语,不 import 任何 `core` / `agent` / `models` / `vectorstores`。
-- **是被整个 monorepo 依赖的基础层**:改它波及面最大,exported API 改动尤其要慎(见下)。
+- **纯工具,零业务**:pkg 是依赖 DAG 的底,只放跨业务模块可复用的通用原语,不 import 应用或业务模块。
+- **独立公开模块**:module path 是 `github.com/Tangerg/pkg`，exported API 改动尤其要慎(见下)。
 
 ## 架构心智
 
@@ -27,5 +27,5 @@
 ## 改动前必看(波及面)
 
 - **加新子包**:先问"stdlib 为什么不够" —— 只在 stdlib 真不够或跨业务模块要复用时才加。
-- **改 exported API**:pkg 被全 monorepo 依赖,宁可加新函数也别改老签名;**任何破坏性改动先咨询 scope + 影响面**(见 root 强约定)。
+- **改 exported API**:宁可加新函数也别改老签名;**任何破坏性改动先咨询 scope + 影响面**。
 - **改 XML / JSON parser 的 buffer 上限**:跑 fuzz,覆盖恶意 LLM 输出。

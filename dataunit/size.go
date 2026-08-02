@@ -1,7 +1,7 @@
 package dataunit
 
 import (
-	xmath "github.com/Tangerg/lynx/pkg/math"
+	xmath "github.com/Tangerg/pkg/math"
 )
 
 // Byte multiplier constants using powers of 1024 (IEC units). Left

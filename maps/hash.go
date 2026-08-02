@@ -4,7 +4,7 @@ import (
 	"iter"
 	"reflect"
 
-	pkgSlices "github.com/Tangerg/lynx/pkg/slices"
+	pkgSlices "github.com/Tangerg/pkg/slices"
 )
 
 // HashMap is a Map interface implementation based on Go's built-in map.

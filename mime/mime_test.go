@@ -3,7 +3,7 @@ package mime
 import (
 	"testing"
 
-	"github.com/Tangerg/lynx/pkg/maps"
+	"github.com/Tangerg/pkg/maps"
 )
 
 // TestMIME_Type tests the Type() method

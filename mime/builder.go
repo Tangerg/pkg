@@ -6,9 +6,9 @@ import (
 
 	"github.com/bits-and-blooms/bitset"
 
-	"github.com/Tangerg/lynx/pkg/assert"
-	"github.com/Tangerg/lynx/pkg/maps"
-	pkgStrings "github.com/Tangerg/lynx/pkg/strings"
+	"github.com/Tangerg/pkg/assert"
+	"github.com/Tangerg/pkg/maps"
+	pkgStrings "github.com/Tangerg/pkg/strings"
 )
 
 // tokenBitSet marks the ASCII characters allowed in a MIME token per

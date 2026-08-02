@@ -6,7 +6,7 @@ import (
 	"io"
 	"sync"
 
-	pkgSlices "github.com/Tangerg/lynx/pkg/slices"
+	pkgSlices "github.com/Tangerg/pkg/slices"
 )
 
 // ErrStreamClosed is returned by [Writer.Write] and [io.Closer.Close]

@@ -1,24 +1,26 @@
 package text
 
 import (
-	"bufio"
 	"strings"
 	"unicode"
 )
 
-// Lines splits s into lines using bufio.Scanner. Returned lines have
-// no terminator. An input that is empty or only whitespace returns
-// []string{""}.
+// Lines splits s into lines, mirroring [bufio.ScanLines]: a lone "\r"
+// before a "\n" is dropped and a trailing newline does not yield a final
+// empty line. Unlike a bufio.Scanner it has no fixed token limit, so a
+// long line is returned intact rather than silently dropped.
 func Lines(s string) []string {
 	if strings.TrimSpace(s) == "" {
 		return []string{""}
 	}
-	sc := bufio.NewScanner(strings.NewReader(s))
-	var out []string
-	for sc.Scan() {
-		out = append(out, sc.Text())
+	lines := strings.Split(s, "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
 	}
-	return out
+	for i, line := range lines {
+		lines[i] = strings.TrimSuffix(line, "\r")
+	}
+	return lines
 }
 
 // AlignToLeft trims leading whitespace from every line of s, joining

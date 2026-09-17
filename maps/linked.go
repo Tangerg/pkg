@@ -2,7 +2,6 @@ package maps
 
 import (
 	"iter"
-	"reflect"
 
 	pkgSlices "github.com/Tangerg/pkg/slices"
 )
@@ -129,12 +128,12 @@ func (l *LinkedMap[K, V]) ContainsKey(key K) bool {
 }
 
 // ContainsValue returns true if this map maps one or more keys to the specified value.
-// This operation requires scanning all entries and uses reflection for deep equality comparison.
+// This operation requires scanning all entries; values are compared with [valuesEqual].
 // Time complexity: O(n)
 func (l *LinkedMap[K, V]) ContainsValue(value V) bool {
 	current := l.head
 	for current != nil {
-		if reflect.DeepEqual(current.value, value) {
+		if valuesEqual(current.value, value) {
 			return true
 		}
 		current = current.next
@@ -251,10 +250,10 @@ func (l *LinkedMap[K, V]) PutIfAbsent(key K, value V) (V, bool) {
 }
 
 // RemoveIf removes the entry for the specified key only if it is currently
-// mapped to the specified value using deep equality comparison.
+// mapped to the specified value, compared with [valuesEqual].
 func (l *LinkedMap[K, V]) RemoveIf(key K, value V) bool {
 	if node, exists := l.nodes[key]; exists {
-		if reflect.DeepEqual(node.value, value) {
+		if valuesEqual(node.value, value) {
 			l.Remove(key)
 			return true
 		}
@@ -277,7 +276,7 @@ func (l *LinkedMap[K, V]) Replace(key K, value V) (V, bool) {
 // ReplaceIf replaces the entry for the specified key only if currently mapped to the specified value.
 func (l *LinkedMap[K, V]) ReplaceIf(key K, oldValue, newValue V) bool {
 	if node, exists := l.nodes[key]; exists {
-		if reflect.DeepEqual(node.value, oldValue) {
+		if valuesEqual(node.value, oldValue) {
 			node.value = newValue
 			return true
 		}

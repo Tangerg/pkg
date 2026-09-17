@@ -19,6 +19,11 @@ func TestLines(t *testing.T) {
 		{"multiple", "a\nb\nc", []string{"a", "b", "c"}},
 		{"with empty middle line", "a\n\nb", []string{"a", "", "b"}},
 		{"crlf", "a\r\nb", []string{"a", "b"}},
+		{"crlf with trailing newline", "a\r\nb\r\n", []string{"a", "b"}},
+		{"cr not followed by lf", "a\rb", []string{"a\rb"}},
+		{"trailing cr at eof dropped", "a\rb\r", []string{"a\rb"}},
+		{"double trailing newline", "a\n\n", []string{"a", ""}},
+		{"only newline", "\n", []string{""}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -27,6 +32,19 @@ func TestLines(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestLines_LongLineNotTruncated guards against the bufio.Scanner 64 KiB
+// token limit: a line longer than that must be returned intact, not dropped.
+func TestLines_LongLineNotTruncated(t *testing.T) {
+	long := strings.Repeat("x", 200*1024)
+	got := Lines("head\n" + long + "\ntail")
+	if len(got) != 3 {
+		t.Fatalf("got %d lines, want 3", len(got))
+	}
+	if got[1] != long {
+		t.Fatalf("long line not preserved: got %d bytes, want %d", len(got[1]), len(long))
 	}
 }
 

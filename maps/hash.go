@@ -2,7 +2,6 @@ package maps
 
 import (
 	"iter"
-	"reflect"
 
 	pkgSlices "github.com/Tangerg/pkg/slices"
 )
@@ -52,10 +51,10 @@ func (h HashMap[K, V]) ContainsKey(key K) bool {
 }
 
 // ContainsValue returns true if this map maps one or more keys to the specified value.
-// This method uses reflection for deep equality comparison, which may impact performance.
+// Values are compared with [valuesEqual].
 func (h HashMap[K, V]) ContainsValue(value V) bool {
 	for _, v := range h {
-		if reflect.DeepEqual(v, value) {
+		if valuesEqual(v, value) {
 			return true
 		}
 	}
@@ -144,9 +143,9 @@ func (h HashMap[K, V]) PutIfAbsent(key K, value V) (V, bool) {
 }
 
 // RemoveIf removes the entry for the specified key only if it is currently
-// mapped to the specified value using deep equality comparison.
+// mapped to the specified value, compared with [valuesEqual].
 func (h HashMap[K, V]) RemoveIf(key K, value V) bool {
-	if existingValue, exists := h[key]; exists && reflect.DeepEqual(existingValue, value) {
+	if existingValue, exists := h[key]; exists && valuesEqual(existingValue, value) {
 		delete(h, key)
 		return true
 	}
@@ -165,7 +164,7 @@ func (h HashMap[K, V]) Replace(key K, value V) (V, bool) {
 
 // ReplaceIf replaces the entry for the specified key only if currently mapped to the specified value.
 func (h HashMap[K, V]) ReplaceIf(key K, oldValue, newValue V) bool {
-	if existingValue, exists := h[key]; exists && reflect.DeepEqual(existingValue, oldValue) {
+	if existingValue, exists := h[key]; exists && valuesEqual(existingValue, oldValue) {
 		h[key] = newValue
 		return true
 	}

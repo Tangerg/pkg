@@ -2,7 +2,6 @@ package system
 
 import "runtime"
 
-// lineSep holds the OS-specific line separator computed at init time.
 var lineSep = func() string {
 	if runtime.GOOS == "windows" {
 		return "\r\n"

@@ -4,138 +4,107 @@ import (
 	"iter"
 )
 
-// Map defines the basic interface for key-value pair mappings.
-// This interface provides comprehensive operations for managing key-value associations,
-// including basic CRUD operations, bulk operations, functional programming methods,
-// and advanced conditional operations similar to Java's Map interface.
+// Map defines the interface shared by the map implementations in this package.
 type Map[K comparable, V any] interface {
-	// Put associates the specified value with the specified key in this map.
-	// If the map previously contained a mapping for the key, the old value is replaced.
-	// Returns the previous value associated with key, and true if there was a previous mapping.
+	// Put associates value with key, returning the previous value and whether the
+	// key was already present.
 	Put(key K, value V) (V, bool)
 
-	// Get returns the value to which the specified key is mapped.
-	// Returns the value associated with the key and true if the key exists,
-	// otherwise returns zero value and false.
+	// Get returns the value for key and whether it is present.
 	Get(key K) (V, bool)
 
-	// Remove removes the mapping for a key from this map if it is present.
-	// Returns the value that was associated with the key and true if the key existed,
-	// otherwise returns zero value and false.
+	// Remove deletes key, returning its value and whether it was present.
 	Remove(key K) (V, bool)
 
-	// ContainsKey returns true if this map contains a mapping for the specified key.
+	// ContainsKey reports whether key is present.
 	ContainsKey(key K) bool
 
-	// ContainsValue returns true if this map maps one or more keys to the specified value.
-	// This operation typically requires time linear in the map size for most implementations.
+	// ContainsValue reports whether any key maps to value.
 	ContainsValue(value V) bool
 
-	// Size returns the number of key-value mappings in this map.
+	// Size returns the number of entries.
 	Size() int
 
-	// IsEmpty returns true if this map contains no key-value mappings.
+	// IsEmpty reports whether the map has no entries.
 	IsEmpty() bool
 
-	// Clear removes all of the mappings from this map.
-	// The map will be empty after this call returns.
+	// Clear removes every entry.
 	Clear()
 
-	// PutAll copies all of the mappings from the specified map to this map.
-	// These mappings will replace any mappings that this map had for any of the keys
-	// currently in the specified map.
+	// PutAll copies every mapping of other into this map.
 	PutAll(other Map[K, V])
 
-	// Keys returns a slice containing all the keys in this map.
-	// The slice is a snapshot; changes to the map are not reflected in the slice.
+	// Keys returns all keys as a snapshot that does not alias the map.
 	Keys() []K
 
-	// Values returns a slice containing all the values in this map.
-	// The slice is a snapshot; changes to the map are not reflected in the slice.
+	// Values returns all values as a snapshot that does not alias the map.
 	Values() []V
 
-	// Entries returns a slice containing all the key-value pairs in this map.
-	// Each entry is represented as an Entry struct containing the key and value.
+	// Entries returns all key-value pairs as a snapshot that does not alias the
+	// map.
 	Entries() []*Entry[K, V]
 
-	// ForEach performs the given action for each key-value pair in this map.
-	// The action function is called once for each mapping in the map.
+	// ForEach calls action once per entry in an implementation-defined order.
 	ForEach(action func(K, V))
 
-	// GetOrDefault returns the value to which the specified key is mapped,
-	// or defaultValue if this map contains no mapping for the key.
+	// GetOrDefault returns the value for key, or defaultValue when key is absent.
 	GetOrDefault(key K, defaultValue V) V
 
-	// PutIfAbsent associates the specified value with the specified key only if
-	// the key is not already associated with a value.
-	// Returns the current value associated with the key and false if the key was already present,
-	// or the new value and true if the key was absent.
+	// PutIfAbsent associates value with key only when key is absent, returning
+	// the value now mapped to key and whether a mapping was stored.
 	PutIfAbsent(key K, value V) (V, bool)
 
-	// RemoveIf removes the entry for the specified key only if it is currently
-	// mapped to the specified value. Returns true if the entry was removed.
+	// RemoveIf deletes key only when it currently equals value.
 	RemoveIf(key K, value V) bool
 
-	// Replace replaces the entry for the specified key only if it is currently mapped to some value.
-	// Returns the previous value associated with the key and true if replacement occurred,
-	// otherwise returns zero value and false.
+	// Replace replaces the value for key only when key is present, returning the
+	// previous value and whether the replacement happened.
 	Replace(key K, value V) (V, bool)
 
-	// ReplaceIf replaces the entry for the specified key only if currently mapped to the specified value.
-	// Returns true if the value was replaced.
+	// ReplaceIf replaces the value for key only when it currently equals oldValue.
 	ReplaceIf(key K, oldValue, newValue V) bool
 
-	// Compute attempts to compute a mapping for the specified key and its current mapped value
-	// (or null if there is no current mapping). The remappingFunction receives the key,
-	// current value, and whether the key exists. If the function returns a value and true,
-	// the mapping is updated; if it returns false, the mapping is removed if it exists.
+	// Compute derives a new mapping for key from its current value and existence:
+	// it stores the returned value when the flag is true, and removes an existing
+	// mapping when it is false.
 	Compute(key K, remappingFunction func(K, V, bool) (V, bool)) (V, bool)
 
-	// ComputeIfAbsent computes a value for the specified key if the key is not already
-	// associated with a value, and associates it with the computed value.
-	// Returns the current (existing or computed) value associated with the key.
+	// ComputeIfAbsent returns the value for key, computing and storing it when the
+	// key is absent.
 	ComputeIfAbsent(key K, mappingFunction func(K) V) V
 
-	// ComputeIfPresent computes a new mapping for the specified key if the key is
-	// currently mapped to a value in this map. Returns the new value and true if
-	// the mapping was updated, otherwise returns zero value and false.
+	// ComputeIfPresent derives a new value for key only when it is present,
+	// returning the new value and whether it was updated.
 	ComputeIfPresent(key K, remappingFunction func(K, V) V) (V, bool)
 
-	// Merge associates the specified value with the specified key if the key is not
-	// already associated with a value. If the key is already associated with a value,
-	// replaces the associated value with the results of the given remapping function.
-	// Returns the new value associated with the key.
+	// Merge stores value under key when absent; otherwise it stores
+	// remappingFunction(current, value).
 	Merge(key K, value V, remappingFunction func(V, V) V) V
 
-	// ReplaceAll replaces each entry's value with the result of invoking the given
-	// function on that entry until all entries have been processed.
+	// ReplaceAll replaces each entry's value with function(key, value).
 	ReplaceAll(function func(K, V) V)
 
-	// Iter returns an iterator that yields key-value pairs.
-	// The iteration order depends on the specific implementation:
-	//   - HashMap: unordered, may vary between iterations
-	//   - LinkedMap: insertion order
-	//   - TreeMap: sorted order (if implemented)
+	// Iter returns an iterator that yields key-value pairs. The order is
+	// implementation-defined: HashMap is unordered while LinkedMap follows
+	// insertion order.
 	Iter() iter.Seq2[K, V]
 
-	// IterKeys returns an iterator that yields keys only.
-	// The iteration order follows the same rules as Iter().
+	// IterKeys returns an iterator that yields keys only, in the same order as
+	// Iter.
 	IterKeys() iter.Seq[K]
 
-	// IterValues returns an iterator that yields values only.
-	// The iteration order follows the same rules as Iter().
+	// IterValues returns an iterator that yields values only, in the same order
+	// as Iter.
 	IterValues() iter.Seq[V]
 
-	// Clone creates an independent copy of this map.
-	// The cloned map contains the same key-value pairs but is a separate instance.
-	// Changes to the original map will not affect the clone and vice versa.
-	// Note: This typically performs a shallow copy.
+	// Clone returns an independent copy of this map with the same entries. The
+	// copy is shallow: pointer, slice, and map values are shared with the
+	// original.
 	Clone() Map[K, V]
 }
 
-// Entry represents a key-value pair entry in the map.
-// This struct encapsulates a single mapping from the map, providing
-// immutable access to both the key and value components.
+// Entry represents a key-value pair in the map. It is immutable: both
+// components are fixed at construction.
 type Entry[K comparable, V any] struct {
 	key   K
 	value V

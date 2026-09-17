@@ -7,8 +7,6 @@ import (
 	"github.com/Tangerg/pkg/slices"
 )
 
-// defaultBufSize is used when the caller does not provide bufSize or
-// passes 0.
 const defaultBufSize = 512
 
 // ReadAll reads from r until EOF and returns the data. It mirrors

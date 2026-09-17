@@ -129,18 +129,15 @@ func RegisterXSubtypes(mappings map[string]string) {
 // registered, the "x-" prefix is dropped. Subtypes without an "x-"
 // prefix are returned as a clone unchanged.
 func NormalizeXSubtype(sourceMime *MIME) *MIME {
-	// Return a clone if the subtype doesn't have x-prefix
 	if !strings.HasPrefix(sourceMime.subType, "x-") {
 		return sourceMime.Clone()
 	}
 
 	xPrefixMutex.RLock()
-	// Check if there's a specific mapping for this x-prefix subtype
 	normalizedSubtype, hasMapping := xPrefixSubtypeToStandard[sourceMime.subType]
 	xPrefixMutex.RUnlock()
 
 	if !hasMapping {
-		// If no mapping found, simply remove the "x-" prefix
 		normalizedSubtype = strings.TrimPrefix(sourceMime.subType, "x-")
 	}
 

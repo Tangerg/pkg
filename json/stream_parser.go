@@ -170,7 +170,6 @@ func (p *StreamParser) Parse() error {
 	}
 }
 
-// processBytes feeds each byte through [StreamParser.processChar].
 func (p *StreamParser) processBytes(data []byte) error {
 	for _, b := range data {
 		if err := p.processChar(b); err != nil {
@@ -180,7 +179,6 @@ func (p *StreamParser) processBytes(data []byte) error {
 	return nil
 }
 
-// processChar advances the parser state for a single byte.
 func (p *StreamParser) processChar(c byte) error {
 	p.pos++
 	if c == '"' && !p.escaped {
@@ -340,7 +338,6 @@ func (p *StreamParser) endScope(kind string) error {
 	return nil
 }
 
-// dispatchObject decodes data as an object and invokes onObject.
 func (p *StreamParser) dispatchObject(data []byte) error {
 	var obj map[string]any
 	if err := json.Unmarshal(data, &obj); err != nil {
@@ -354,7 +351,6 @@ func (p *StreamParser) dispatchObject(data []byte) error {
 	return nil
 }
 
-// dispatchArray decodes data as an array and invokes onArray.
 func (p *StreamParser) dispatchArray(data []byte) error {
 	var arr []any
 	if err := json.Unmarshal(data, &arr); err != nil {
@@ -368,14 +364,12 @@ func (p *StreamParser) dispatchArray(data []byte) error {
 	return nil
 }
 
-// notify forwards err to OnError if configured.
 func (p *StreamParser) notify(err error) {
 	if p.onError != nil {
 		p.onError(err)
 	}
 }
 
-// closingChar returns the closing token for a scope kind.
 func closingChar(kind string) string {
 	switch kind {
 	case "object":

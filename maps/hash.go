@@ -6,13 +6,11 @@ import (
 	pkgSlices "github.com/Tangerg/pkg/slices"
 )
 
-// HashMap is a Map interface implementation based on Go's built-in map.
-// It provides constant-time performance for basic operations (get and put),
-// assuming the hash function disperses elements properly among the buckets.
-// This implementation is not synchronized and is not thread-safe.
+// HashMap is a [Map] backed by Go's built-in map. It is not safe for
+// concurrent use; wrap it with [SyncMap] to share it across goroutines.
 type HashMap[K comparable, V any] map[K]V
 
-// NewHashMap create a new HashMap instance
+// NewHashMap returns an empty HashMap with capacity for size entries.
 func NewHashMap[K comparable, V any](size ...int) HashMap[K, V] {
 	c, _ := pkgSlices.First(size)
 	if c <= 0 {
@@ -21,21 +19,21 @@ func NewHashMap[K comparable, V any](size ...int) HashMap[K, V] {
 	return make(HashMap[K, V], c)
 }
 
-// Put associates the specified value with the specified key in this map.
-// If the map previously contained a mapping for the key, the old value is replaced.
+// Put associates value with key, returning the previous value and whether the
+// key was already present.
 func (h HashMap[K, V]) Put(key K, value V) (V, bool) {
 	oldValue, exists := h[key]
 	h[key] = value
 	return oldValue, exists
 }
 
-// Get returns the value to which the specified key is mapped.
+// Get returns the value for key and whether it is present.
 func (h HashMap[K, V]) Get(key K) (V, bool) {
 	value, exists := h[key]
 	return value, exists
 }
 
-// Remove removes the mapping for a key from this map if it is present.
+// Remove deletes key, returning its value and whether it was present.
 func (h HashMap[K, V]) Remove(key K) (V, bool) {
 	value, exists := h[key]
 	if exists {
@@ -44,13 +42,13 @@ func (h HashMap[K, V]) Remove(key K) (V, bool) {
 	return value, exists
 }
 
-// ContainsKey returns true if this map contains a mapping for the specified key.
+// ContainsKey reports whether key is present.
 func (h HashMap[K, V]) ContainsKey(key K) bool {
 	_, exists := h[key]
 	return exists
 }
 
-// ContainsValue returns true if this map maps one or more keys to the specified value.
+// ContainsValue reports whether any key maps to value.
 // Values are compared with [valuesEqual].
 func (h HashMap[K, V]) ContainsValue(value V) bool {
 	for _, v := range h {
@@ -61,30 +59,29 @@ func (h HashMap[K, V]) ContainsValue(value V) bool {
 	return false
 }
 
-// Size returns the number of key-value mappings in this map.
+// Size returns the number of entries.
 func (h HashMap[K, V]) Size() int {
 	return len(h)
 }
 
-// IsEmpty returns true if this map contains no key-value mappings.
+// IsEmpty reports whether the map has no entries.
 func (h HashMap[K, V]) IsEmpty() bool {
 	return h.Size() == 0
 }
 
-// Clear removes all of the mappings from this map using Go's built-in clear function.
+// Clear removes every entry.
 func (h HashMap[K, V]) Clear() {
 	clear(h)
 }
 
-// PutAll copies all of the mappings from the specified map to this map.
+// PutAll copies every mapping of other into this map.
 func (h HashMap[K, V]) PutAll(other Map[K, V]) {
 	other.ForEach(func(k K, v V) {
 		h[k] = v
 	})
 }
 
-// Keys returns a slice containing all the keys in this map.
-// The returned slice is a snapshot of the current keys.
+// Keys returns all keys as a snapshot; the slice does not alias the map.
 func (h HashMap[K, V]) Keys() []K {
 	keys := make([]K, 0, h.Size())
 	for k := range h {
@@ -93,8 +90,7 @@ func (h HashMap[K, V]) Keys() []K {
 	return keys
 }
 
-// Values returns a slice containing all the values in this map.
-// The returned slice is a snapshot of the current values.
+// Values returns all values as a snapshot; the slice does not alias the map.
 func (h HashMap[K, V]) Values() []V {
 	values := make([]V, 0, h.Size())
 	for _, v := range h {
@@ -103,8 +99,8 @@ func (h HashMap[K, V]) Values() []V {
 	return values
 }
 
-// Entries returns a slice containing all the key-value pairs in this map.
-// Each entry is represented as a pointer to an Entry struct.
+// Entries returns all key-value pairs as a snapshot; the slice does not alias
+// the map.
 func (h HashMap[K, V]) Entries() []*Entry[K, V] {
 	entries := make([]*Entry[K, V], 0, h.Size())
 	for k, v := range h {
@@ -116,15 +112,14 @@ func (h HashMap[K, V]) Entries() []*Entry[K, V] {
 	return entries
 }
 
-// ForEach performs the given action for each key-value pair in this map.
+// ForEach calls action once per entry in an unspecified order.
 func (h HashMap[K, V]) ForEach(action func(K, V)) {
 	for k, v := range h {
 		action(k, v)
 	}
 }
 
-// GetOrDefault returns the value to which the specified key is mapped,
-// or defaultValue if this map contains no mapping for the key.
+// GetOrDefault returns the value for key, or defaultValue when key is absent.
 func (h HashMap[K, V]) GetOrDefault(key K, defaultValue V) V {
 	if value, exists := h[key]; exists {
 		return value
@@ -132,8 +127,8 @@ func (h HashMap[K, V]) GetOrDefault(key K, defaultValue V) V {
 	return defaultValue
 }
 
-// PutIfAbsent associates the specified value with the specified key only if
-// the key is not already associated with a value.
+// PutIfAbsent associates value with key only when key is absent, returning the
+// value now mapped to key and whether a mapping was stored.
 func (h HashMap[K, V]) PutIfAbsent(key K, value V) (V, bool) {
 	if existingValue, exists := h[key]; exists {
 		return existingValue, false
@@ -142,8 +137,8 @@ func (h HashMap[K, V]) PutIfAbsent(key K, value V) (V, bool) {
 	return value, true
 }
 
-// RemoveIf removes the entry for the specified key only if it is currently
-// mapped to the specified value, compared with [valuesEqual].
+// RemoveIf deletes key only when it currently equals value, compared with
+// [valuesEqual].
 func (h HashMap[K, V]) RemoveIf(key K, value V) bool {
 	if existingValue, exists := h[key]; exists && valuesEqual(existingValue, value) {
 		delete(h, key)
@@ -152,7 +147,8 @@ func (h HashMap[K, V]) RemoveIf(key K, value V) bool {
 	return false
 }
 
-// Replace replaces the entry for the specified key only if it is currently mapped to some value.
+// Replace replaces the value for key only when key is present, returning the
+// previous value and whether the replacement happened.
 func (h HashMap[K, V]) Replace(key K, value V) (V, bool) {
 	if oldValue, exists := h[key]; exists {
 		h[key] = value
@@ -162,7 +158,8 @@ func (h HashMap[K, V]) Replace(key K, value V) (V, bool) {
 	return zero, false
 }
 
-// ReplaceIf replaces the entry for the specified key only if currently mapped to the specified value.
+// ReplaceIf replaces the value for key only when it currently equals oldValue,
+// compared with [valuesEqual].
 func (h HashMap[K, V]) ReplaceIf(key K, oldValue, newValue V) bool {
 	if existingValue, exists := h[key]; exists && valuesEqual(existingValue, oldValue) {
 		h[key] = newValue
@@ -171,8 +168,9 @@ func (h HashMap[K, V]) ReplaceIf(key K, oldValue, newValue V) bool {
 	return false
 }
 
-// Compute attempts to compute a mapping for the specified key and its current mapped value.
-// The remappingFunc receives the key, current value, and existence flag.
+// Compute derives a new mapping for key from its current value and existence:
+// it stores the returned value when the flag is true, and removes an existing
+// mapping when it is false.
 func (h HashMap[K, V]) Compute(key K, remappingFunc func(K, V, bool) (V, bool)) (V, bool) {
 	oldValue, exists := h[key]
 	newValue, shouldPut := remappingFunc(key, oldValue, exists)
@@ -188,8 +186,8 @@ func (h HashMap[K, V]) Compute(key K, remappingFunc func(K, V, bool) (V, bool)) 
 	return zero, false
 }
 
-// ComputeIfAbsent computes a value for the specified key if the key is not already
-// associated with a value, and associates it with the computed value.
+// ComputeIfAbsent returns the value for key, computing and storing it when key
+// is absent.
 func (h HashMap[K, V]) ComputeIfAbsent(key K, mappingFunction func(K) V) V {
 	if value, exists := h[key]; exists {
 		return value
@@ -200,8 +198,8 @@ func (h HashMap[K, V]) ComputeIfAbsent(key K, mappingFunction func(K) V) V {
 	return newValue
 }
 
-// ComputeIfPresent computes a new mapping for the specified key if the key is
-// currently mapped to a value in this map.
+// ComputeIfPresent derives a new value for key only when key is present,
+// returning the new value and whether it was updated.
 func (h HashMap[K, V]) ComputeIfPresent(key K, remappingFunc func(K, V) V) (V, bool) {
 	if oldValue, exists := h[key]; exists {
 		newValue := remappingFunc(key, oldValue)
@@ -213,9 +211,8 @@ func (h HashMap[K, V]) ComputeIfPresent(key K, remappingFunc func(K, V) V) (V, b
 	return zero, false
 }
 
-// Merge associates the specified value with the specified key if the key is not
-// already associated with a value, or merges the existing value with the new value
-// using the provided remapping function.
+// Merge stores value under key when absent; otherwise it stores
+// remappingFunc(current, value).
 func (h HashMap[K, V]) Merge(key K, value V, remappingFunc func(V, V) V) V {
 	if oldValue, exists := h[key]; exists {
 		newValue := remappingFunc(oldValue, value)
@@ -227,23 +224,14 @@ func (h HashMap[K, V]) Merge(key K, value V, remappingFunc func(V, V) V) V {
 	return value
 }
 
-// ReplaceAll replaces each entry's value with the result of invoking the given
-// function on that entry's key and value.
+// ReplaceAll replaces each entry's value with function(key, value).
 func (h HashMap[K, V]) ReplaceAll(function func(K, V) V) {
 	for k, v := range h {
 		h[k] = function(k, v)
 	}
 }
 
-// Iter returns an iterator that yields key-value pairs.
-// Note: HashMap does not guarantee any specific iteration order.
-// The order may vary between different iterations and Go versions.
-//
-// Example:
-//
-//	for k, v := range HashMap.Iter() {
-//		fmt.Printf("%v: %v\n", k, v)
-//	}
+// Iter yields each key-value pair in an unspecified order.
 func (h HashMap[K, V]) Iter() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		for k, v := range h {
@@ -254,15 +242,7 @@ func (h HashMap[K, V]) Iter() iter.Seq2[K, V] {
 	}
 }
 
-// IterKeys returns an iterator that yields keys only.
-// Note: HashMap does not guarantee any specific iteration order.
-// The order may vary between different iterations and Go versions.
-//
-// Example:
-//
-//	for k := range HashMap.IterKeys() {
-//		fmt.Printf("Key: %v\n", k)
-//	}
+// IterKeys yields each key in an unspecified order.
 func (h HashMap[K, V]) IterKeys() iter.Seq[K] {
 	return func(yield func(K) bool) {
 		for k := range h {
@@ -273,15 +253,7 @@ func (h HashMap[K, V]) IterKeys() iter.Seq[K] {
 	}
 }
 
-// IterValues returns an iterator that yields values only.
-// Note: HashMap does not guarantee any specific iteration order.
-// The order may vary between different iterations and Go versions.
-//
-// Example:
-//
-//	for v := range HashMap.IterValues() {
-//		fmt.Printf("Value: %v\n", v)
-//	}
+// IterValues yields each value in an unspecified order.
 func (h HashMap[K, V]) IterValues() iter.Seq[V] {
 	return func(yield func(V) bool) {
 		for _, v := range h {
@@ -292,18 +264,8 @@ func (h HashMap[K, V]) IterValues() iter.Seq[V] {
 	}
 }
 
-// Clone creates an independent copy of the HashMap.
-// The cloned map contains the same key-value pairs but is a separate instance.
-// Changes to the original map will not affect the clone and vice versa.
-//
-// Note: This performs a shallow copy - if values contain pointers,
-// the pointed-to data is shared between original and clone.
-//
-// Example:
-//
-//	original := HashMap[string, int]{"a": 1, "b": 2}
-//	cloned := original.Clone()
-//	cloned.Put("c", 3) // Only affects the clone
+// Clone returns an independent HashMap with the same entries. The copy is
+// shallow: pointer, slice, and map values are shared with the original.
 func (h HashMap[K, V]) Clone() Map[K, V] {
 	cloned := NewHashMap[K, V](h.Size())
 	cloned.PutAll(h)

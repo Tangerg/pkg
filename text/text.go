@@ -117,8 +117,6 @@ func DeleteBottomLines(s string, n int) string {
 	return strings.Join(lines[:len(lines)-n], "\n")
 }
 
-// joinWith applies fn to each line and joins the results with "\n",
-// adding a trailing newline.
 func joinWith(lines []string, fn func(string) string) string {
 	var sb strings.Builder
 	for _, line := range lines {

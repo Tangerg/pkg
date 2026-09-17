@@ -325,8 +325,6 @@ var second = &unicode.RangeTable{
 	},
 }
 
-// expandSelfCloseElement expands a self-closing element into separate start and end elements.
-// Example: "<element />" -> "<element>", "</element>"
 func expandSelfCloseElement(element string, eleName string) (string, string) {
 	startEle := strings.TrimSuffix(element, "/>")
 	startEle = strings.TrimRightFunc(startEle, unicode.IsSpace)
@@ -337,9 +335,8 @@ func expandSelfCloseElement(element string, eleName string) (string, string) {
 	return startEle, endEle
 }
 
-// ExpandSelfCloseElement is the public method to expand self-closing elements.
-// Input: "<element attr='value'/>"
-// Output: "<element attr='value'>", "</element>"
+// ExpandSelfCloseElement splits a self-closing tag into its start and end tags.
+// It reports an error if element is not a self-closing tag.
 func ExpandSelfCloseElement(element string) (string, string, error) {
 	if !IsSelfClosingElement(element) {
 		return "", "", errors.New("element is not self-closing")
@@ -354,26 +351,23 @@ func ExpandSelfCloseElement(element string) (string, string, error) {
 	return startEle, endEle, nil
 }
 
-// extractElementContent extracts the content between start and end elements.
-// Example: "<element>content</element>" -> "content"
 func extractElementContent(element string, eleName string) []byte {
 	startEleEnd := strings.Index(element, ">")
 	if startEleEnd == -1 {
 		return nil
 	}
 
-	// Find the start of the end element
 	endEle := "</" + eleName + ">"
 	endEleStart := strings.LastIndex(element, endEle)
 	if endEleStart == -1 || endEleStart <= startEleEnd {
 		return nil
 	}
 
-	// Extract content between elements
 	return []byte(element[startEleEnd+1 : endEleStart])
 }
 
-// ExtractElementContent is the public method to extract element content automatically.
+// ExtractElementContent returns the content between an element's start and end
+// tags. It reports an error when the element has no name or no such content.
 func ExtractElementContent(element string) ([]byte, error) {
 	name := extractElementName(element)
 	if name.Local == "" {
@@ -388,9 +382,6 @@ func ExtractElementContent(element string) ([]byte, error) {
 	return content, nil
 }
 
-// parseAttrs parses element attributes from an opening element.
-// Input: "<element attr1='value1' attr2=\"value2\">"
-// Output: []Attr{{Name: "attr1", Value: "value1"}, {Name: "attr2", Value: "value2"}}
 func parseAttrs(startEle string) ([]Attr, error) {
 	attrs := make([]Attr, 0, 4)
 
@@ -444,7 +435,6 @@ func parseAttrs(startEle string) ([]Attr, error) {
 
 		valueStart := pos
 
-		// Find matching closing quote
 		for pos < len(attrStr) && attrStr[pos] != quote {
 			pos++
 		}
@@ -465,7 +455,8 @@ func parseAttrs(startEle string) ([]Attr, error) {
 	return attrs, nil
 }
 
-// ParseAttrs is the public method to parse element attributes.
+// ParseAttrs returns the attributes of a start or self-closing tag. It reports
+// an error if startEle is not valid element syntax or an attribute is malformed.
 func ParseAttrs(startEle string) ([]Attr, error) {
 	if !isValidElementSyntax(startEle) {
 		return nil, errors.New("invalid element syntax")
@@ -474,8 +465,6 @@ func ParseAttrs(startEle string) ([]Attr, error) {
 	return parseAttrs(startEle)
 }
 
-// extractElementName extracts the element name from an element string.
-// Supports: "<element>", "</element>", "<element/>"
 func extractElementName(eleContent string) Name {
 	n := len(eleContent)
 	if n < 2 {
@@ -510,7 +499,7 @@ func extractElementName(eleContent string) Name {
 	return Name{Local: eleContent[start:end]}
 }
 
-// ExtractElementName is the public method to extract element name.
+// ExtractElementName returns the name of a start, end, or self-closing tag.
 func ExtractElementName(eleContent string) (Name, error) {
 	if !isValidElementSyntax(eleContent) {
 		return Name{}, errors.New("invalid element syntax")
@@ -524,7 +513,7 @@ func ExtractElementName(eleContent string) (Name, error) {
 	return name, nil
 }
 
-// IsStartElement checks if the element is a start element.
+// IsStartElement reports whether element is a start tag.
 func IsStartElement(element string) bool {
 	if !isValidElementSyntax(element) {
 		return false
@@ -548,7 +537,7 @@ func IsStartElement(element string) bool {
 	return true
 }
 
-// IsEndElement checks if the element is an end element.
+// IsEndElement reports whether element is an end tag.
 func IsEndElement(element string) bool {
 	if !isValidElementSyntax(element) {
 		return false
@@ -562,7 +551,7 @@ func IsEndElement(element string) bool {
 	return trimmed[1] == '/' && !strings.HasSuffix(trimmed, "/>")
 }
 
-// IsSelfClosingElement checks if the element is self-closing.
+// IsSelfClosingElement reports whether element is a self-closing tag.
 func IsSelfClosingElement(element string) bool {
 	if !isValidElementSyntax(element) {
 		return false
@@ -639,7 +628,6 @@ func isValidElementSyntax(element string) bool {
 	return isValidAttributes(attrPart)
 }
 
-// isValidAttributes validates attribute syntax.
 func isValidAttributes(attrStr string) bool {
 	pos := 0
 
@@ -708,8 +696,8 @@ func isValidAttributes(attrStr string) bool {
 	return true
 }
 
-// isNameString validates if a string is a valid XML name.
-// copy from encoding/xml
+// isNameString reports whether s is a valid XML name, using the tables
+// copied from encoding/xml.
 func isNameString(s string) bool {
 	if len(s) == 0 {
 		return false

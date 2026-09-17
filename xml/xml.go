@@ -6,8 +6,7 @@ import (
 	"strings"
 )
 
-// Name represents an XML element name.
-// It contains the local name of the element without namespace prefix.
+// Name is an XML element name: the local name, without namespace prefix.
 type Name struct {
 	Local string
 }
@@ -23,8 +22,8 @@ type Attr struct {
 	Value string
 }
 
-// String returns the string representation of the attribute in the format: name="value".
-// The value is XML-escaped to ensure valid XML output.
+// String returns the attribute formatted as name="value", with the value
+// XML-escaped.
 func (a Attr) String() string {
 	sb := new(strings.Builder)
 	xml.Escape(sb, []byte(a.Value))
@@ -38,8 +37,7 @@ type StartElement struct {
 	Attrs []Attr
 }
 
-// String returns the string representation of the start element.
-// It formats the element with all its attributes in valid XML syntax.
+// String returns the start tag in valid XML syntax.
 func (e StartElement) String() string {
 	sb := new(strings.Builder)
 	sb.WriteString("<")
@@ -54,8 +52,8 @@ func (e StartElement) String() string {
 	return sb.String()
 }
 
-// Copy creates a deep copy of the StartElement.
-// It duplicates the attributes slice to prevent shared references.
+// Copy returns a deep copy: the Attrs slice is duplicated so the copy shares
+// no backing array with e.
 func (e StartElement) Copy() StartElement {
 	attrs := make([]Attr, len(e.Attrs))
 	copy(attrs, e.Attrs)
@@ -84,8 +82,7 @@ func (e EndElement) Copy() EndElement {
 	return EndElement{e.Name}
 }
 
-// Content is an interface that represents any XML content.
-// It can be either an Element or CharData.
+// Content is any XML content: either an [Element] or [CharData].
 type Content interface {
 	String() string
 	content()
@@ -100,8 +97,7 @@ type Element struct {
 	End      EndElement
 }
 
-// Copy creates a deep copy of the Element.
-// It recursively copies all nested contents.
+// Copy returns a deep copy, recursively copying nested contents.
 func (e Element) Copy() Element {
 	contents := make([]Content, len(e.Contents))
 	for i, content := range e.Contents {
@@ -114,16 +110,13 @@ func (e Element) Copy() Element {
 	}
 }
 
-// content implements the Content interface marker method.
 func (e Element) content() {}
 
-// copy implements the Content interface copy method.
 func (e Element) copy() Content {
 	return e.Copy()
 }
 
-// String returns the complete string representation of the element.
-// It includes the start tag, all content, and the end tag.
+// String returns the complete element, from start tag through end tag.
 func (e Element) String() string {
 	sb := new(strings.Builder)
 	sb.WriteString(e.Start.String())
@@ -136,8 +129,7 @@ func (e Element) String() string {
 	return sb.String()
 }
 
-// CharData represents character data (text content) in an XML element.
-// It is stored as a byte slice and will be XML-escaped when converted to string.
+// CharData is XML character data. Its [CharData.String] form is XML-escaped.
 type CharData []byte
 
 // Copy creates a copy of the CharData.
@@ -145,10 +137,8 @@ func (c CharData) Copy() CharData {
 	return CharData(bytes.Clone(c))
 }
 
-// content implements the Content interface marker method.
 func (c CharData) content() {}
 
-// copy implements the Content interface copy method.
 func (c CharData) copy() Content {
 	return c.Copy()
 }

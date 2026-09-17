@@ -20,11 +20,11 @@ func (e *interruptError) Unwrap() error {
 	return e.inner
 }
 
-// ElementListener defines a listener for specific XML elements.
-// It provides callbacks when complete elements are parsed and allows buffer size control.
+// ElementListener describes one element to track. MaxBufferSize bounds what the
+// scanner may buffer for it while it is open.
 type ElementListener struct {
-	Name       Name                // Element name to listen for
-	OnComplete func(Element) error // Callback when element parsing is complete
+	Name       Name
+	OnComplete func(Element) error
 	// MaxBufferSize is the enforced upper bound, in bytes, on the buffered
 	// representation of this element while it is being parsed. The buffer never
 	// grows past the limit: any write that would reach it — content, the text
@@ -35,28 +35,25 @@ type ElementListener struct {
 	// truncated element. Zero or negative falls back to the default applied by
 	// [StreamScannerConfig.ApplyDefaults].
 	MaxBufferSize int
-	EmitAlways    bool // If true, emit nested elements immediately
+	EmitAlways    bool
 }
 
-// elementScope represents a parsing scope for an XML element.
-// It tracks the element being built and its associated listener.
 type elementScope struct {
-	element  Element          // Element being constructed
-	listener *ElementListener // Associated listener configuration
+	element  Element
+	listener *ElementListener
 	// limit is the effective cap, in bytes, on this scope's buffer: the
 	// MaxBufferSize its own listener declares, or, for an element no listener
 	// tracks, the limit inherited from the enclosing scope — everything
 	// buffered here is copied into the enclosing buffer when the scope closes.
 	// 0 means unlimited.
-	limit    int
-	overflow bool // True once a refused write has been reported for this scope
+	limit int
+	// overflow is set once an overflow has been reported, so a scope reports at
+	// most one error however many writes it refuses.
+	overflow bool
 }
 
-// appendCharData adds character data to the current scope's element.
-// It intelligently merges consecutive CharData to optimize memory usage:
-// 1. If no contents exist, append directly
-// 2. If last content is CharData, merge with it
-// 3. If last content is Element, append as new content
+// appendCharData appends to the scope's element, merging into a trailing
+// CharData so consecutive text stays a single run.
 func (s *elementScope) appendCharData(chars CharData) {
 	if len(s.element.Contents) == 0 {
 		s.element.Contents = append(s.element.Contents, chars)
@@ -73,20 +70,18 @@ func (s *elementScope) appendCharData(chars CharData) {
 	}
 }
 
-// appendElement adds a complete element to the current scope.
 func (s *elementScope) appendElement(element Element) {
 	s.element.Contents = append(s.element.Contents, element)
 }
 
-// elementStack manages nested element scopes using a stack structure.
-// Each scope has an associated buffer for accumulating the element's string representation.
+// elementStack holds the open nesting scopes with a buffer per scope; scope and
+// buffer are parallel slices of the same depth.
 type elementStack struct {
-	length int             // Current stack depth
-	scope  []*elementScope // Stack of element scopes
-	buffer []*bytes.Buffer // Corresponding buffers for each scope
+	length int
+	scope  []*elementScope
+	buffer []*bytes.Buffer
 }
 
-// newStack creates a new element stack with initial capacity.
 func newStack() *elementStack {
 	return &elementStack{
 		scope:  make([]*elementScope, 0, 8),
@@ -94,21 +89,18 @@ func newStack() *elementStack {
 	}
 }
 
-// reset clears the stack to initial state.
 func (s *elementStack) reset() {
 	s.length = 0
 	s.scope = s.scope[:0]
 	s.buffer = s.buffer[:0]
 }
 
-// push adds a new scope and buffer to the stack.
 func (s *elementStack) push(scope *elementScope, buffer *bytes.Buffer) {
 	s.scope = append(s.scope, scope)
 	s.buffer = append(s.buffer, buffer)
 	s.length++
 }
 
-// pop removes and returns the top scope and buffer from the stack.
 func (s *elementStack) pop() (*elementScope, *bytes.Buffer) {
 	if s.length == 0 {
 		return nil, nil
@@ -124,7 +116,6 @@ func (s *elementStack) pop() (*elementScope, *bytes.Buffer) {
 	return lastScope, lastBuffer
 }
 
-// last returns the top scope and buffer without removing them.
 func (s *elementStack) last() (*elementScope, *bytes.Buffer) {
 	if s.length == 0 {
 		return nil, nil
@@ -132,12 +123,10 @@ func (s *elementStack) last() (*elementScope, *bytes.Buffer) {
 	return s.scope[s.length-1], s.buffer[s.length-1]
 }
 
-// len returns the current stack depth.
 func (s *elementStack) len() int {
 	return s.length
 }
 
-// string returns the full stack bufferd element string
 func (s *elementStack) string() string {
 	sb := new(strings.Builder)
 	for _, buffer := range s.buffer {
@@ -146,13 +135,12 @@ func (s *elementStack) string() string {
 	return sb.String()
 }
 
-// buffers holds various buffers used during parsing.
+// buffers holds the in-progress element tag and the out-of-element text.
 type buffers struct {
-	element *bytes.Buffer // Buffer for current element being parsed
-	text    *bytes.Buffer // Buffer for text content outside elements
+	element *bytes.Buffer
+	text    *bytes.Buffer
 }
 
-// newBuffers creates a new set of buffers with specified initial size.
 func newBuffers(size int) *buffers {
 	return &buffers{
 		element: bytes.NewBuffer(make([]byte, 0)),
@@ -160,27 +148,24 @@ func newBuffers(size int) *buffers {
 	}
 }
 
-// reset clears all buffers to initial state.
 func (b *buffers) reset() {
 	b.element.Reset()
 	b.text.Reset()
 }
 
-// elementState tracks the current parsing state.
+// elementState is the byte-level state of the tag currently being read.
 type elementState struct {
-	inElement bool // Inside an element (between < and >)
-	inName    bool // Inside element name
-	inAttrs   bool // Inside attribute section
-	inString  bool // Inside a quoted string
-	quoteChar byte // Current quote character (' or ")
+	inElement bool // between '<' and '>'
+	inName    bool // within the element name
+	inAttrs   bool // within the attribute section
+	inString  bool // within a quoted attribute value
+	quoteChar byte // the opening quote of that value
 }
 
-// newElementState creates a new element state.
 func newElementState() *elementState {
 	return &elementState{}
 }
 
-// reset clears the state to initial values.
 func (s *elementState) reset() {
 	s.inElement = false
 	s.inName = false
@@ -191,10 +176,10 @@ func (s *elementState) reset() {
 
 // StreamScannerConfig configures the behavior of StreamScanner.
 type StreamScannerConfig struct {
-	Listeners       []*ElementListener // List of element listeners
-	OnText          func(string) error // Callback for text content outside tracked elements
-	MaxNestingLevel int                // Maximum allowed nesting depth
-	BufferSize      int                // Buffer size for reading input
+	Listeners       []*ElementListener
+	OnText          func(string) error
+	MaxNestingLevel int
+	BufferSize      int
 	// MaxTextBufferSize caps, in bytes, the text buffered outside tracked
 	// elements — including a stray closing tag and the unclosed remainder
 	// flushed at the end of the scan. 0 applies the default of 1 MiB (1<<20); a
@@ -203,12 +188,12 @@ type StreamScannerConfig struct {
 	// overflow", in non-strict mode the overflow is reported through OnError
 	// and parsing continues with the truncated text.
 	MaxTextBufferSize int
-	StrictMode        bool        // If true, structural errors terminate parsing; if false, treat as text
-	OnError           func(error) // Optional error logging callback (called in non-strict mode)
+	// StrictMode makes structural errors terminate parsing; otherwise they are
+	// treated as text.
+	StrictMode bool
+	OnError    func(error)
 }
 
-// defaultMaxTextBufferSize is the MaxTextBufferSize applied by ApplyDefaults
-// when the caller leaves the field at its zero value.
 const defaultMaxTextBufferSize = 1 << 20
 
 // ApplyDefaults fills zero / negative fields with package defaults.
@@ -252,24 +237,24 @@ func (c *StreamScannerConfig) Validate() error {
 
 // StreamScanner performs streaming XML parsing with selective element tracking.
 type StreamScanner struct {
-	bufferSize      int // Size of read buffer
-	maxNestingLevel int // Maximum nesting depth allowed
-	maxTextSize     int // Cap on text buffered outside tracked elements
+	bufferSize      int
+	maxNestingLevel int
+	maxTextSize     int
 	// maxTagSize caps the scratch buffer holding the tag currently being read.
 	// Nothing else bounds that scratch, so an unterminated tag could otherwise
 	// grow with the input; it is the largest cap the caller configured, because
 	// a tag that fits in no configured buffer cannot become part of one.
 	maxTagSize     int
-	textOverflowed bool                      // True once a text cap overflow has been reported
-	tagOverflowed  bool                      // True once a tag cap overflow has been reported
-	listeners      map[Name]*ElementListener // Map of element listeners
-	onText         func(string) error        // Text content callback
-	strictMode     bool                      // Strict parsing mode
-	onError        func(error)               // Error logging callback
-	pos            int                       // Number of bytes processed
-	stack          *elementStack             // Stack for nested elements
-	buffers        *buffers                  // Parsing buffers
-	elementState   *elementState             // Current parsing state
+	textOverflowed bool
+	tagOverflowed  bool
+	listeners      map[Name]*ElementListener
+	onText         func(string) error
+	strictMode     bool
+	onError        func(error)
+	pos            int
+	stack          *elementStack
+	buffers        *buffers
+	elementState   *elementState
 }
 
 // NewStreamScanner creates a new stream scanner with the given configuration.
@@ -303,7 +288,6 @@ func NewStreamScanner(config StreamScannerConfig) (*StreamScanner, error) {
 		elementState:    newElementState(),
 	}
 
-	// Register listeners
 	for _, listener := range config.Listeners {
 		scanner.listeners[listener.Name] = listener
 	}
@@ -346,7 +330,6 @@ func (p *StreamScanner) Reset() {
 	p.pos = 0
 }
 
-// flushText sends accumulated text to the OnText callback.
 func (p *StreamScanner) flushText() error {
 	if p.buffers.text.Len() == 0 {
 		return nil
@@ -365,9 +348,7 @@ func (p *StreamScanner) flushText() error {
 	return nil
 }
 
-// finalize completes the parsing process and validates final state.
 func (p *StreamScanner) finalize() error {
-	// Flush remaining text
 	if err := p.flushText(); err != nil {
 		return err
 	}
@@ -388,7 +369,6 @@ func (p *StreamScanner) finalize() error {
 	return p.flushText()
 }
 
-// processChunk processes a chunk of data byte by byte.
 func (p *StreamScanner) processChunk(data []byte) error {
 	for _, b := range data {
 		p.pos++
@@ -396,7 +376,7 @@ func (p *StreamScanner) processChunk(data []byte) error {
 			if p.strictMode {
 				return err
 			}
-			// if error is an interruptErr
+			// An interruptError stays fatal even in non-strict mode.
 			if _, ok := errors.AsType[*interruptError](err); ok {
 				return err
 			}
@@ -406,7 +386,6 @@ func (p *StreamScanner) processChunk(data []byte) error {
 	return nil
 }
 
-// processByte processes a single byte based on current state.
 func (p *StreamScanner) processByte(b byte) error {
 	if (b == '"' || b == '\'') && p.elementState.inElement {
 		if !p.elementState.inString {
@@ -441,7 +420,6 @@ func (p *StreamScanner) processByte(b byte) error {
 	}
 }
 
-// isInScope returns true if currently inside a tracked element.
 func (p *StreamScanner) isInScope() bool {
 	return p.stack.len() > 0
 }
@@ -509,8 +487,6 @@ func (p *StreamScanner) refuseTagWrite(add int) error {
 	return p.overflowError(err)
 }
 
-// appendScope writes s into buffer, honouring scope's cap; a refused write is
-// dropped and reported. See refuseScopeWrite.
 func (p *StreamScanner) appendScope(scope *elementScope, buffer *bytes.Buffer, s string) error {
 	if scopeFull(scope, buffer, len(s)) {
 		return p.refuseScopeWrite(scope, buffer, len(s))
@@ -519,8 +495,6 @@ func (p *StreamScanner) appendScope(scope *elementScope, buffer *bytes.Buffer, s
 	return nil
 }
 
-// appendText writes s into the out-of-element text buffer, honouring the text
-// cap; a refused write is dropped and reported. See refuseTextWrite.
 func (p *StreamScanner) appendText(s string) error {
 	if p.textBufferFull(len(s)) {
 		return p.refuseTextWrite(len(s))
@@ -529,8 +503,6 @@ func (p *StreamScanner) appendText(s string) error {
 	return nil
 }
 
-// writeTagByte appends b to the tag currently being read; a write past the tag
-// cap is dropped and reported once. See refuseTagWrite.
 func (p *StreamScanner) writeTagByte(b byte) error {
 	if p.maxTagSize > 0 && p.buffers.element.Len()+1 >= p.maxTagSize {
 		return p.refuseTagWrite(1)
@@ -539,10 +511,6 @@ func (p *StreamScanner) writeTagByte(b byte) error {
 	return nil
 }
 
-// writeToCurrentBuffer writes a byte to the current scope's buffer, or to the
-// out-of-element text buffer when no scope is active. A write that would exceed
-// the active buffer cap is dropped instead of appended; see refuseScopeWrite
-// and refuseTextWrite.
 func (p *StreamScanner) writeToCurrentBuffer(b byte) error {
 	if scope, buffer := p.stack.last(); scope != nil {
 		if scopeFull(scope, buffer, 1) {
@@ -559,10 +527,6 @@ func (p *StreamScanner) writeToCurrentBuffer(b byte) error {
 	return nil
 }
 
-// writeStringToCurrentBuffer writes a string to the current scope's buffer, or
-// to the out-of-element text buffer when no scope is active. A write that would
-// exceed the active buffer cap is dropped instead of appended; see
-// refuseScopeWrite and refuseTextWrite.
 func (p *StreamScanner) writeStringToCurrentBuffer(s string) error {
 	if scope, buffer := p.stack.last(); scope != nil {
 		if scopeFull(scope, buffer, len(s)) {
@@ -575,7 +539,6 @@ func (p *StreamScanner) writeStringToCurrentBuffer(s string) error {
 	return p.appendText(s)
 }
 
-// handleWhitespace processes whitespace characters.
 func (p *StreamScanner) handleWhitespace(b byte) error {
 	if p.elementState.inElement {
 		if err := p.writeTagByte(b); err != nil {
@@ -591,20 +554,17 @@ func (p *StreamScanner) handleWhitespace(b byte) error {
 	return p.writeToCurrentBuffer(b)
 }
 
-// handleElementOpen handles '<' character (element opening).
 func (p *StreamScanner) handleElementOpen(b byte) error {
 	if p.elementState.inElement {
 		return p.writeTagByte(b)
 	}
 
-	// Flush text content before starting new element
 	if !p.isInScope() {
 		if err := p.flushText(); err != nil {
 			return err
 		}
 	}
 
-	// Reset state for new element
 	p.elementState.reset()
 	p.elementState.inElement = true
 	p.buffers.element.Reset()
@@ -612,7 +572,6 @@ func (p *StreamScanner) handleElementOpen(b byte) error {
 	return p.writeTagByte(b)
 }
 
-// handleElementClose handles '>' character (element closing).
 func (p *StreamScanner) handleElementClose(b byte) error {
 	if !p.elementState.inElement {
 		return p.writeToCurrentBuffer(b)
@@ -622,7 +581,6 @@ func (p *StreamScanner) handleElementClose(b byte) error {
 		return err
 	}
 
-	// If inside quoted string, continue parsing
 	if p.elementState.inString {
 		return nil
 	}
@@ -640,7 +598,6 @@ func (p *StreamScanner) handleElementClose(b byte) error {
 
 	p.elementState.reset()
 
-	// Determine element type and process accordingly
 	switch {
 	case strings.HasPrefix(eleContent, "</"):
 		return p.processCloseElement(eleContent)
@@ -651,7 +608,6 @@ func (p *StreamScanner) handleElementClose(b byte) error {
 	}
 }
 
-// handleRegularChar processes regular characters.
 func (p *StreamScanner) handleRegularChar(b byte) error {
 	if p.elementState.inElement {
 		if err := p.writeTagByte(b); err != nil {
@@ -668,14 +624,12 @@ func (p *StreamScanner) handleRegularChar(b byte) error {
 	return p.writeToCurrentBuffer(b)
 }
 
-// logError logs an error in non-strict mode.
 func (p *StreamScanner) logError(err error) {
 	if p.onError != nil {
 		p.onError(err)
 	}
 }
 
-// processOpenElement processes an opening element like <element>.
 func (p *StreamScanner) processOpenElement(eleContent string) error {
 	eleName := extractElementName(eleContent)
 
@@ -684,7 +638,6 @@ func (p *StreamScanner) processOpenElement(eleContent string) error {
 		return p.writeStringToCurrentBuffer(eleContent)
 	}
 
-	// Check nesting level
 	if p.stack.len() >= p.maxNestingLevel {
 		err := errors.Join(
 			p.writeStringToCurrentBuffer(eleContent),
@@ -711,7 +664,6 @@ func (p *StreamScanner) processOpenElement(eleContent string) error {
 	return p.pushScope(eleName, attrs, eleContent, listener)
 }
 
-// processCloseElement processes a closing element like </element>.
 func (p *StreamScanner) processCloseElement(eleContent string) error {
 	eleName := extractElementName(eleContent)
 
@@ -723,7 +675,6 @@ func (p *StreamScanner) processCloseElement(eleContent string) error {
 	return p.popScope(eleName, eleContent)
 }
 
-// processSelfCloseElement processes a self-closing element like <element/>.
 func (p *StreamScanner) processSelfCloseElement(eleContent string) error {
 	eleName := extractElementName(eleContent)
 
@@ -741,7 +692,6 @@ func (p *StreamScanner) processSelfCloseElement(eleContent string) error {
 	return p.processCloseElement(closeEle)
 }
 
-// pushScope pushes a new element scope onto the stack.
 func (p *StreamScanner) pushScope(eleName Name, attrs []Attr, openEle string, listener *ElementListener) error {
 	scope := &elementScope{
 		element: Element{
@@ -772,15 +722,12 @@ func (p *StreamScanner) scopeLimit(listener *ElementListener) int {
 	return 0
 }
 
-// popScope pops an element scope from the stack and processes the complete element.
 func (p *StreamScanner) popScope(eleName Name, closeEle string) error {
 	currentScope, currentBuffer := p.stack.last()
 	if currentScope == nil {
 		return p.appendText(closeEle)
 	}
 
-	// Stack not empty, check top element
-	// Check if element name matches
 	if currentScope.element.Start.Name != eleName {
 		writeErr := p.writeStringToCurrentBuffer(closeEle)
 		err := fmt.Errorf("mismatched closing element at position %d: expected </%s>, got </%s>",
@@ -827,7 +774,6 @@ func (p *StreamScanner) popScope(eleName Name, closeEle string) error {
 		}
 	}
 
-	// Determine if callback should be triggered
 	if currentScope.listener == nil {
 		return refused
 	}
@@ -838,7 +784,7 @@ func (p *StreamScanner) popScope(eleName Name, closeEle string) error {
 	}
 
 	if err := currentScope.listener.OnComplete(element); err != nil {
-		// External callback errors are always fatal
+		// External callback errors are always fatal.
 		return &interruptError{
 			inner: fmt.Errorf("OnComplete callback for <%s>: %w",
 				currentScope.element.Start.Name, err),

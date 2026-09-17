@@ -5,24 +5,12 @@ import (
 	"maps"
 )
 
-// HashSet is a hash table-based Set implementation using Go's built-in map.
-// It provides excellent performance with O(1) average case for all basic operations,
-// but does not preserve insertion order.
+// HashSet is a [Set] backed by Go's built-in map. It is not safe for concurrent
+// use; wrap it with [SyncSet].
 type HashSet[T comparable] map[T]struct{}
 
-// NewHashSet creates a new hash-based set implementation.
-// HashSet provides O(1) average time complexity for basic operations
-// but does not maintain any particular order of elements.
-//
-// The optional size parameter can be used to specify the initial capacity
-// to avoid map reallocations. If multiple size values are provided,
-// only the last positive value is used.
-//
-// Example:
-//
-//	set := NewHashSet[int]()           // default capacity
-//	set := NewHashSet[int](100)        // initial capacity of 100
-//	set := NewHashSet[string](0,50)   // capacity of 50 (last positive value)
+// NewHashSet returns an empty HashSet, using the last positive size argument as
+// the initial capacity.
 func NewHashSet[T comparable](size ...int) HashSet[T] {
 	c := 0
 	for _, s := range size {
@@ -33,24 +21,24 @@ func NewHashSet[T comparable](size ...int) HashSet[T] {
 	return make(HashSet[T], c)
 }
 
-// Size returns the number of elements with O(1) time complexity.
+// Size returns the number of elements.
 func (s HashSet[T]) Size() int {
 	return len(s)
 }
 
-// IsEmpty checks if the set is empty with O(1) time complexity.
+// IsEmpty reports whether the set has no elements.
 func (s HashSet[T]) IsEmpty() bool {
 	return s.Size() == 0
 }
 
-// Contains checks element existence with O(1) average time complexity.
+// Contains reports whether x is in the set.
 func (s HashSet[T]) Contains(x T) bool {
 	_, ok := s[x]
 	return ok
 }
 
-// ContainsAll checks if all specified elements exist in the set.
-// Short-circuits on the first missing element for efficiency.
+// ContainsAll reports whether every item is in the set; true for an empty
+// argument list.
 func (s HashSet[T]) ContainsAll(items ...T) bool {
 	for _, item := range items {
 		if !s.Contains(item) {
@@ -60,8 +48,8 @@ func (s HashSet[T]) ContainsAll(items ...T) bool {
 	return true
 }
 
-// ContainsAny checks if any of the specified elements exist in the set.
-// Short-circuits on the first found element for efficiency.
+// ContainsAny reports whether any item is in the set; false for an empty
+// argument list.
 func (s HashSet[T]) ContainsAny(items ...T) bool {
 	for _, item := range items {
 		if s.Contains(item) {
@@ -71,8 +59,7 @@ func (s HashSet[T]) ContainsAny(items ...T) bool {
 	return false
 }
 
-// Add inserts an element with O(1) average time complexity.
-// Returns false if the element already exists.
+// Add inserts x when absent, reporting whether the set changed.
 func (s HashSet[T]) Add(x T) bool {
 	if s.Contains(x) {
 		return false
@@ -81,8 +68,8 @@ func (s HashSet[T]) Add(x T) bool {
 	return true
 }
 
-// AddAll inserts multiple elements efficiently.
-// Returns true if at least one element was actually added.
+// AddAll inserts every item not already present, reporting whether the set
+// changed.
 func (s HashSet[T]) AddAll(items ...T) bool {
 	changed := false
 	for _, item := range items {
@@ -93,8 +80,7 @@ func (s HashSet[T]) AddAll(items ...T) bool {
 	return changed
 }
 
-// Remove deletes an element with O(1) average time complexity.
-// Returns false if the element doesn't exist.
+// Remove deletes x, reporting whether it was present.
 func (s HashSet[T]) Remove(x T) bool {
 	if !s.Contains(x) {
 		return false
@@ -103,8 +89,7 @@ func (s HashSet[T]) Remove(x T) bool {
 	return true
 }
 
-// RemoveAll deletes multiple elements efficiently.
-// Returns true if at least one element was actually removed.
+// RemoveAll deletes every present item, reporting whether the set changed.
 func (s HashSet[T]) RemoveAll(items ...T) bool {
 	changed := false
 	for _, item := range items {
@@ -115,14 +100,13 @@ func (s HashSet[T]) RemoveAll(items ...T) bool {
 	return changed
 }
 
-// Retain keeps only the specified element, removing all others.
-// Returns false if the element doesn't exist and the set is already empty.
+// Retain keeps only x, reporting whether the set changed.
 func (s HashSet[T]) Retain(x T) bool {
 	return s.RetainAll(x)
 }
 
-// RetainAll keeps only elements that are present in the items slice.
-// If items is empty, clears the entire set.
+// RetainAll keeps only the items, reporting whether the set changed; an empty
+// list clears the set.
 func (s HashSet[T]) RetainAll(items ...T) bool {
 	if len(items) == 0 {
 		if s.IsEmpty() {
@@ -148,20 +132,17 @@ func (s HashSet[T]) RetainAll(items ...T) bool {
 	return changed
 }
 
-// Clear removes all elements using Go's built-in clear function.
-// This is more efficient than manually deleting each element.
+// Clear removes every element.
 func (s HashSet[T]) Clear() {
 	clear(s)
 }
 
-// Iter returns an iterator over the set elements in undefined order.
-// Uses the efficient maps.Keys function from the standard library.
+// Iter yields each element in undefined order.
 func (s HashSet[T]) Iter() iter.Seq[T] {
 	return maps.Keys(s)
 }
 
-// ToSlice returns a slice containing all set elements in undefined order.
-// The slice is pre-allocated with the correct capacity for efficiency.
+// ToSlice returns all elements in undefined order.
 func (s HashSet[T]) ToSlice() []T {
 	slice := make([]T, 0, s.Size())
 	for x := range s {
@@ -170,8 +151,7 @@ func (s HashSet[T]) ToSlice() []T {
 	return slice
 }
 
-// Clone creates an independent copy of the set.
-// The new set has the same capacity as the original for efficiency.
+// Clone returns an independent HashSet with the same elements.
 func (s HashSet[T]) Clone() Set[T] {
 	result := NewHashSet[T](s.Size())
 	for x := range s {

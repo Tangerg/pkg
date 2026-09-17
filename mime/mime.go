@@ -8,9 +8,7 @@ import (
 )
 
 const (
-	// wildcardType is the "*" character used for wildcard type or subtype.
 	wildcardType = "*"
-	// paramCharset is the standard parameter name for the character set.
 	paramCharset = "charset"
 )
 
@@ -231,12 +229,10 @@ func (m *MIME) EqualsParams(otherMime *MIME) bool {
 		return false
 	}
 
-	// Check if parameter counts match
 	if m.params.Size() != otherMime.params.Size() {
 		return false
 	}
 
-	// Compare each parameter
 	parametersEqual := true
 	m.params.ForEach(func(paramKey, paramValue string) {
 		otherValue, ok := otherMime.params.Get(paramKey)
@@ -306,7 +302,6 @@ func (m *MIME) IsMoreSpecific(otherMime *MIME) bool {
 		return true
 	}
 
-	// For equal types, compare parameter count
 	if m.EqualsTypeAndSubtype(otherMime) {
 		return m.params.Size() > otherMime.params.Size()
 	}

@@ -2,7 +2,6 @@ package bufio
 
 import "bytes"
 
-// dropCR strips a trailing '\r' from data.
 func dropCR(data []byte) []byte {
 	if len(data) > 0 && data[len(data)-1] == '\r' {
 		return data[:len(data)-1]
@@ -56,10 +55,8 @@ func ScanLinesAllFormats(data []byte, atEOF bool) (advance int, token []byte, er
 		}
 		return r + 1, dropCR(data[:r]), nil
 	case atEOF:
-		// Final line without terminator.
 		return len(data), data, nil
 	default:
-		// Need more input.
 		return 0, nil, nil
 	}
 }

@@ -16,14 +16,12 @@ import (
 var tokenBitSet *bitset.BitSet
 
 func init() {
-	// Initialize control characters bitset (0-31 and 127)
 	controlChars := bitset.New(128)
 	for i := uint(0); i <= 31; i++ {
 		controlChars.Set(i)
 	}
 	controlChars.Set(127)
 
-	// Initialize separator characters bitset
 	separatorChars := bitset.New(128)
 	separatorPositions := []uint{40, 41, 60, 62, 64, 44, 59, 58, 92, 34, 47, 91, 93, 63, 61, 123, 125, 32, 9}
 	for _, position := range separatorPositions {
@@ -132,7 +130,6 @@ func (b *Builder) WithParam(paramKey string, paramValue string) *Builder {
 		return b
 	}
 
-	// Handle charset parameter specially
 	if normalizedKey == paramCharset {
 		return b.WithCharset(paramValue)
 	}
@@ -156,7 +153,6 @@ func (b *Builder) FromMime(sourceMime *MIME) *Builder {
 		return b
 	}
 
-	// Deep copy all fields from source MIME
 	b.mime._type = sourceMime._type
 	b.mime.subType = sourceMime.subType
 	b.mime.charset = sourceMime.charset
@@ -170,7 +166,6 @@ func (b *Builder) FromMime(sourceMime *MIME) *Builder {
 // [MIME]. Empty type or subtype default to "*". An invalid token in
 // any component produces an error.
 func (b *Builder) Build() (*MIME, error) {
-	// Validate and set default for type
 	if b.mime._type == "" {
 		b.mime._type = wildcardType
 	} else {
@@ -179,7 +174,6 @@ func (b *Builder) Build() (*MIME, error) {
 		}
 	}
 
-	// Validate and set default for subtype
 	if b.mime.subType == "" {
 		b.mime.subType = wildcardType
 	} else {
@@ -188,14 +182,12 @@ func (b *Builder) Build() (*MIME, error) {
 		}
 	}
 
-	// Validate charset if present
 	if b.mime.charset != "" {
 		if err := b.checkToken(b.mime.charset); err != nil {
 			return nil, err
 		}
 	}
 
-	// Validate all parameters
 	if err := b.checkParams(); err != nil {
 		return nil, err
 	}

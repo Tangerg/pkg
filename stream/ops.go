@@ -52,7 +52,6 @@ func Pipe[T any](sizes ...int) (Reader[T], Writer[T]) {
 	return s, s
 }
 
-// teeReader reads from r and writes each successful value to w.
 type teeReader[T any] struct {
 	r Reader[T]
 	w Writer[T]
@@ -76,8 +75,6 @@ func TeeReader[T any](r Reader[T], w Writer[T]) Reader[T] {
 	return &teeReader[T]{r: r, w: w}
 }
 
-// multiReader reads through readers in order, exhausting each before
-// moving to the next.
 type multiReader[T any] struct {
 	readers []Reader[T]
 }
@@ -107,8 +104,6 @@ func MultiReader[T any](readers ...Reader[T]) Reader[T] {
 	return &multiReader[T]{readers: slices.Clone(readers)}
 }
 
-// multiWriter fans writes out to a list of writers; the first error
-// stops the broadcast.
 type multiWriter[T any] struct {
 	writers []Writer[T]
 }
@@ -129,7 +124,6 @@ func MultiWriter[T any](writers ...Writer[T]) Writer[T] {
 	return &multiWriter[T]{writers: slices.Clone(writers)}
 }
 
-// mapperReader applies fn to each value read from r.
 type mapperReader[T, U any] struct {
 	r  Reader[T]
 	fn func(T) U
@@ -158,7 +152,6 @@ func Map[T, U any](r Reader[T], fn func(T) U) Reader[U] {
 	return &mapperReader[T, U]{r: r, fn: fn}
 }
 
-// filterReader keeps only values that satisfy pred.
 type filterReader[T any] struct {
 	r    Reader[T]
 	pred func(T) bool
@@ -186,8 +179,6 @@ func Filter[T any](r Reader[T], pred func(T) bool) Reader[T] {
 	return &filterReader[T]{r: r, pred: pred}
 }
 
-// flatMapReader expands each source value into a Reader and emits its
-// values before consuming the next source value.
 type flatMapReader[T, U any] struct {
 	r       Reader[T]
 	fn      func(T) Reader[U]

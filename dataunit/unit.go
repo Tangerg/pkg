@@ -22,7 +22,7 @@ type DataUnit struct {
 	suffix string
 }
 
-// Size returns the byte size of one of the unit (e.g. 1024 for KB).
+// Size returns the number of bytes in one unit (e.g. 1024 for KB).
 func (u *DataUnit) Size() DataSize { return u.size }
 
 // Suffix returns the textual suffix (e.g. "KB").

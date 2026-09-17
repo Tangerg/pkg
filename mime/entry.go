@@ -46,7 +46,6 @@ func MustNew(mimeType string, subType string) *MIME {
 // values are preserved verbatim. Returns [ErrorInvalidMimeType] if
 // the input is malformed.
 func Parse(mimeString string) (*MIME, error) {
-	// Find the first semicolon, which separates the type/subtype from parameters
 	semicolonIndex := strings.Index(mimeString, ";")
 	typeSubtypeString := mimeString
 	if semicolonIndex >= 0 {
@@ -63,7 +62,6 @@ func Parse(mimeString string) (*MIME, error) {
 		typeSubtypeString = "*/*"
 	}
 
-	// Ensure the type/subtype contains a forward slash
 	slashIndex := strings.Index(typeSubtypeString, "/")
 	if slashIndex == -1 {
 		return nil, fmt.Errorf("%w: does not contain '/'", ErrorInvalidMimeType)
@@ -96,7 +94,6 @@ func Parse(mimeString string) (*MIME, error) {
 			nextSemicolonIndex++
 		}
 
-		// Extract and process the parameter
 		parameterString := strings.TrimSpace(mimeString[semicolonIndex+1 : nextSemicolonIndex])
 		if len(parameterString) > 0 {
 			equalsIndex := strings.Index(parameterString, "=")

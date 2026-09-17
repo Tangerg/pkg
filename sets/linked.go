@@ -10,37 +10,17 @@ type node[T comparable] struct {
 	next  *node[T]
 }
 
-// LinkedSet is a Set implementation that maintains insertion order.
-// It combines a hash map for O(1) lookups with a doubly-linked list
-// for maintaining and iterating over elements in insertion order.
-//
-// This implementation provides:
-//   - O(1) lookup, insertion, and deletion
-//   - Predictable iteration order (insertion order)
-//   - Memory overhead for storing linked list pointers
+// LinkedSet is a [Set] backed by a hash map plus a doubly-linked list, so it
+// keeps O(1) membership while iterating in insertion order. It is not safe for
+// concurrent use; wrap it with [SyncSet].
 type LinkedSet[T comparable] struct {
-	nodes map[T]*node[T] // Maps elements to their linked list nodes for O(1) access
-	head  *node[T]       // First element in insertion order
-	tail  *node[T]       // Last element in insertion order
+	nodes map[T]*node[T]
+	head  *node[T]
+	tail  *node[T]
 }
 
-// NewLinkedSet creates a new insertion-ordered set implementation.
-// LinkedSet maintains the order in which elements were first added,
-// providing predictable iteration order while still offering O(1)
-// lookup performance through an internal hash map.
-//
-// The optional size parameter specifies initial capacity for the internal map.
-// If multiple size values are provided, only the last positive value is used.
-//
-// Example:
-//
-//	set := NewLinkedSet[string]()     // default capacity
-//	set := NewLinkedSet[int](50)      // initial capacity of 50
-//
-// Use cases:
-//   - When you need set semantics but want predictable iteration order
-//   - Building ordered unique collections
-//   - Maintaining insertion history
+// NewLinkedSet returns an empty insertion-ordered set, using the last positive
+// size argument as the initial capacity of the internal map.
 func NewLinkedSet[T comparable](size ...int) *LinkedSet[T] {
 	c := 0
 	for _, s := range size {
@@ -53,27 +33,24 @@ func NewLinkedSet[T comparable](size ...int) *LinkedSet[T] {
 	}
 }
 
-// Size returns the number of elements using the hash map size.
-// Time complexity: O(1)
+// Size returns the number of elements.
 func (l *LinkedSet[T]) Size() int {
 	return len(l.nodes)
 }
 
-// IsEmpty checks if the set contains no elements.
-// Time complexity: O(1)
+// IsEmpty reports whether the set has no elements.
 func (l *LinkedSet[T]) IsEmpty() bool {
 	return l.Size() == 0
 }
 
-// Contains checks element existence using the internal hash map.
-// Time complexity: O(1)
+// Contains reports whether x is in the set.
 func (l *LinkedSet[T]) Contains(x T) bool {
 	_, exists := l.nodes[x]
 	return exists
 }
 
-// ContainsAll checks if all specified elements exist in the set.
-// Short-circuits on the first missing element.
+// ContainsAll reports whether every item is in the set; true for an empty
+// argument list.
 func (l *LinkedSet[T]) ContainsAll(items ...T) bool {
 	for _, item := range items {
 		if !l.Contains(item) {
@@ -83,8 +60,8 @@ func (l *LinkedSet[T]) ContainsAll(items ...T) bool {
 	return true
 }
 
-// ContainsAny checks if any of the specified elements exist in the set.
-// Short-circuits on the first found element.
+// ContainsAny reports whether any item is in the set; false for an empty
+// argument list.
 func (l *LinkedSet[T]) ContainsAny(items ...T) bool {
 	for _, item := range items {
 		if l.Contains(item) {
@@ -94,9 +71,7 @@ func (l *LinkedSet[T]) ContainsAny(items ...T) bool {
 	return false
 }
 
-// Add inserts an element at the end of the insertion order.
-// Returns false if the element already exists.
-// Time complexity: O(1)
+// Add inserts x, appending it last, and reports whether it was newly added.
 func (l *LinkedSet[T]) Add(x T) bool {
 	if l.Contains(x) {
 		return false
@@ -109,7 +84,6 @@ func (l *LinkedSet[T]) Add(x T) bool {
 		l.head = newNode
 		l.tail = newNode
 	} else {
-		// Non-empty list - append to tail
 		l.tail.next = newNode
 		newNode.prev = l.tail
 		l.tail = newNode
@@ -118,8 +92,7 @@ func (l *LinkedSet[T]) Add(x T) bool {
 	return true
 }
 
-// AddAll adds multiple elements in the order they appear in the items slice.
-// Elements already in the set are skipped, maintaining the original insertion order.
+// AddAll inserts each item in order, reporting whether any was newly added.
 func (l *LinkedSet[T]) AddAll(items ...T) bool {
 	changed := false
 	for _, item := range items {
@@ -130,8 +103,6 @@ func (l *LinkedSet[T]) AddAll(items ...T) bool {
 	return changed
 }
 
-// removeNode removes a node from the doubly-linked list and updates head/tail pointers.
-// This is a helper method that handles all the pointer manipulation safely.
 func (l *LinkedSet[T]) removeNode(node *node[T]) {
 	if node.prev != nil {
 		node.prev.next = node.next
@@ -145,31 +116,25 @@ func (l *LinkedSet[T]) removeNode(node *node[T]) {
 		l.tail = node.prev
 	}
 
-	// Clear the removed node's pointers to prevent memory leaks
+	// Drop the node's own links so it does not keep its neighbours alive.
 	node.prev = nil
 	node.next = nil
 }
 
-// Remove removes an element while maintaining the linked list structure.
-// Returns false if the element doesn't exist.
-// Time complexity: O(1)
+// Remove deletes x, reporting whether it was present.
 func (l *LinkedSet[T]) Remove(x T) bool {
-	// Find the node using the hash map for O(1) lookup
 	nodeToRemove, exists := l.nodes[x]
 	if !exists {
 		return false
 	}
 
-	// Remove from hash map
 	delete(l.nodes, x)
-
-	// Remove from linked list structure
 	l.removeNode(nodeToRemove)
 
 	return true
 }
 
-// RemoveAll removes multiple elements efficiently.
+// RemoveAll deletes every present item, reporting whether the set changed.
 func (l *LinkedSet[T]) RemoveAll(items ...T) bool {
 	changed := false
 	for _, item := range items {
@@ -180,15 +145,13 @@ func (l *LinkedSet[T]) RemoveAll(items ...T) bool {
 	return changed
 }
 
-// Retain keeps only the specified element, removing all others.
-// If the element doesn't exist, the set becomes empty.
+// Retain keeps only x, reporting whether the set changed.
 func (l *LinkedSet[T]) Retain(x T) bool {
 	return l.RetainAll(x)
 }
 
-// RetainAll keeps only elements that appear in the items slice.
-// This effectively performs a set intersection operation.
-// If items is empty, the set is cleared.
+// RetainAll keeps only the items, reporting whether the set changed; an empty
+// list clears the set.
 func (l *LinkedSet[T]) RetainAll(items ...T) bool {
 	if len(items) == 0 {
 		if l.IsEmpty() {
@@ -203,12 +166,11 @@ func (l *LinkedSet[T]) RetainAll(items ...T) bool {
 		toRetain[item] = struct{}{}
 	}
 
-	// Traverse the linked list and remove elements not in the retain set
 	current := l.head
 	changed := false
 
 	for current != nil {
-		next := current.next // Save next before potential deletion
+		next := current.next
 		if !toRetain.Contains(current.value) {
 			delete(l.nodes, current.value)
 			l.removeNode(current)
@@ -220,10 +182,8 @@ func (l *LinkedSet[T]) RetainAll(items ...T) bool {
 	return changed
 }
 
-// Clear removes all elements and resets the linked list structure.
-// Carefully clears all node pointers to prevent memory leaks.
+// Clear removes every element.
 func (l *LinkedSet[T]) Clear() {
-	// Walk through the linked list and clear all node pointers
 	current := l.head
 	for current != nil {
 		next := current.next
@@ -232,14 +192,12 @@ func (l *LinkedSet[T]) Clear() {
 		current = next
 	}
 
-	// Reset the data structures
 	clear(l.nodes)
 	l.head = nil
 	l.tail = nil
 }
 
-// Iter returns an iterator that yields elements in insertion order.
-// This is the key advantage of LinkedSet over HashSet.
+// Iter yields each element in insertion order.
 func (l *LinkedSet[T]) Iter() iter.Seq[T] {
 	return func(yield func(T) bool) {
 		current := l.head
@@ -252,8 +210,7 @@ func (l *LinkedSet[T]) Iter() iter.Seq[T] {
 	}
 }
 
-// ToSlice returns a slice with elements in insertion order.
-// The slice is pre-allocated with the correct capacity for efficiency.
+// ToSlice returns all elements in insertion order.
 func (l *LinkedSet[T]) ToSlice() []T {
 	result := make([]T, 0, l.Size())
 	current := l.head
@@ -264,8 +221,8 @@ func (l *LinkedSet[T]) ToSlice() []T {
 	return result
 }
 
-// Clone creates an independent copy that preserves insertion order.
-// The cloned set will have the same elements in the same order.
+// Clone returns an independent LinkedSet with the same elements in insertion
+// order.
 func (l *LinkedSet[T]) Clone() Set[T] {
 	cloned := NewLinkedSet[T](l.Size())
 	current := l.head

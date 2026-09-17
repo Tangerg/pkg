@@ -45,7 +45,6 @@ func (s FutureState) IsFailed() bool { return s == FutureStateFailed }
 // IsCancelled reports whether the future was canceled.
 func (s FutureState) IsCancelled() bool { return s == FutureStateCancelled }
 
-// int32 returns the underlying value for atomic storage.
 func (s FutureState) int32() int32 { return int32(s) }
 
 // Future represents a typed asynchronous computation producing a value
@@ -142,8 +141,7 @@ func NewFutureTaskAndRunWithPool[V any](task func(interrupt <-chan struct{}) (V,
 	return f, nil
 }
 
-// complete records the final value or error and closes the done /
-// interrupt channels. It runs at most once.
+// complete records the final result and closes done; it runs at most once.
 func (f *FutureTask[V]) complete(v V, err error) {
 	f.doneOnce.Do(func() {
 		if err != nil {
@@ -162,7 +160,7 @@ func (f *FutureTask[V]) complete(v V, err error) {
 	})
 }
 
-// Run executes the task. Subsequent calls are no-ops.
+// Run starts the task; subsequent calls are no-ops.
 func (f *FutureTask[V]) Run() {
 	if !f.State().IsCreated() {
 		return

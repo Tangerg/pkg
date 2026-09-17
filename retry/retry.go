@@ -44,7 +44,6 @@ type Strategy struct {
 	delayConfig  DelayConfig
 }
 
-// defaultStrategy returns a Strategy populated with package defaults.
 func defaultStrategy() *Strategy {
 	return &Strategy{
 		context:      context.Background(),
@@ -308,7 +307,6 @@ func calculateMaxBackoffStep(baseDelay time.Duration) int {
 	return step
 }
 
-// doRetry implements the retry loop shared by Retrier and ResultRetrier.
 func doRetry[T any](op OperationWithResult[T], s *Strategy) (T, error) {
 	var zero T
 	if err := s.context.Err(); err != nil {

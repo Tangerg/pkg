@@ -39,12 +39,11 @@
 - **xml 流式上限不可旁路**:`StreamScanner` 内部所有写入必须经 `appendScope` / `appendText` / `writeTagByte` 等受控 helper;元素上限(`ElementListener.MaxBufferSize`)、元素外文本上限(`MaxTextBufferSize`)、tag 暂存上限三处都要生效。动这些路径必须保留 `xml/scanner_test.go` 里的 `*CapCovers*` 回归测试。
 - **json 流式计费**:`stream_parser.go` 的 `buffered` 对同一 top-level 值跨作用域只计一次,值完成 / 丢弃后归零;所有解析器错误必须经 `fail` 恰好上报 `OnError` 一次,`OnError` 不接收用户回调或 reader 的错误。
 - **text.Lines 语义**:对齐 `bufio.ScanLines`(去尾部 `\r`、无尾随空行),但**无 token 上限**——长行不截断。不要再改回 `bufio.Scanner`(其 64 KiB 上限会静默丢行)。
+- **retry 抖动的唯一随机源**:`RandomJitter` / `FullJitterBackoff` 只能经包内 `randInt64N` 变量取随机数——`math/rand/v2` 没有可播种的全局源,测试只能靠替换它拿到确定性。不要改回直接调 `rand.Int64N`。`FullJitterBackoff` 里 `ceiling <= 0` 那支是构造上不可达的防御(挡住 `rand.Int64N(0)` 的 panic),不算死代码。
+- **retry 测试不得并行**:`retry` 包用替换 `randInt64N` 的方式做确定性断言,`t.Parallel` 会与替换互相干扰。
 
 ## 改动后必跑
 
 - `gofmt -l .`、`go vet ./...`、`go test -race ./...`(并发包尤其)。
+- `./scripts/check-imports.sh`(依赖闭包护栏:只允许 stdlib 与 go.mod 声明的三方库,且不 import 业务模块)。
 - 改 `xml` / `json` 解析器:跑对应 `-fuzz` 目标各数秒。
-
-## 已知缺口
-
-- 仍缺 CI:AGENTS.md 要求用 CI 锁住"不 import 业务模块"这条不变量,并在 CI 跑 gofmt / vet / test -race。影响:护栏目前只靠约定,回归无自动拦截。

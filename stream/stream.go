@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
-	"sync"
+	"sync/atomic"
 
 	pkgSlices "github.com/Tangerg/pkg/slices"
 )
@@ -36,57 +36,67 @@ type Stream[T any] interface {
 	io.Closer
 }
 
-// stream is the channel-based implementation of [Stream]. The mutex
-// makes Close wait for in-flight writes so closing the channel never
-// races with a send.
+// stream is the channel-based implementation of [Stream]. The value
+// channel is never closed: [stream.Close] signals completion through
+// done instead, so a writer blocked on a full channel is released rather
+// than wedging Close and, with it, every later write and read.
 type stream[T any] struct {
 	value  chan T
-	mu     sync.RWMutex
-	closed bool
+	done   chan struct{}
+	closed atomic.Bool
 }
 
-// Read implements [Reader.Read].
+// Read implements [Reader.Read]. Once the stream is closed it still
+// hands over the values that were already accepted and reports io.EOF
+// only after they are drained.
 func (s *stream[T]) Read(ctx context.Context) (v T, err error) {
 	select {
 	case <-ctx.Done():
 		return v, ctx.Err()
-	case val, ok := <-s.value:
-		if !ok {
+	case val := <-s.value:
+		return val, nil
+	case <-s.done:
+		// Closed: hand over whatever is still buffered before EOF.
+		select {
+		case val := <-s.value:
+			return val, nil
+		default:
 			return v, io.EOF
 		}
-		return val, nil
 	}
 }
 
-// Write implements [Writer.Write].
+// Write implements [Writer.Write]. A write that is already blocked when
+// [stream.Close] runs is released with [ErrStreamClosed], which is what
+// lets Close return without waiting for writers and keeps in-flight
+// writes from racing a channel close.
 func (s *stream[T]) Write(ctx context.Context, v T) error {
-	s.mu.RLock()
-	if s.closed {
-		s.mu.RUnlock()
+	if s.closed.Load() {
 		return ErrStreamClosed
 	}
 	select {
 	case <-ctx.Done():
-		s.mu.RUnlock()
 		return ctx.Err()
+	case <-s.done:
+		return ErrStreamClosed
 	case s.value <- v:
-		s.mu.RUnlock()
 		return nil
 	}
 }
 
-// Close marks the stream closed and closes the underlying channel.
-// Subsequent calls return [ErrStreamClosed]. In-flight writes finish
-// before the channel is closed; subsequent reads drain buffered data
-// then observe io.EOF.
+// Close marks the stream closed and releases every blocked reader and
+// writer. Subsequent calls return [ErrStreamClosed].
+//
+// Close returns promptly even when a writer is blocked on a full channel:
+// that writer fails with [ErrStreamClosed], values already accepted stay
+// readable until they are drained (then io.EOF), and no goroutine is left
+// blocked. A write that was already in flight may still land after Close;
+// every write started after Close returned fails with [ErrStreamClosed].
 func (s *stream[T]) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
+	if !s.closed.CompareAndSwap(false, true) {
 		return ErrStreamClosed
 	}
-	s.closed = true
-	close(s.value)
+	close(s.done)
 	return nil
 }
 
@@ -94,9 +104,7 @@ func (s *stream[T]) Close() error {
 // still handle [ErrStreamClosed] from Write rather than relying on
 // this snapshot.
 func (s *stream[T]) IsClosed() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.closed
+	return s.closed.Load()
 }
 
 // NewStream returns a new [Stream] with optional buffer size. Only the
@@ -119,5 +127,8 @@ func NewStream[T any](sizes ...int) Stream[T] {
 	if size < 0 {
 		size = 0
 	}
-	return &stream[T]{value: make(chan T, size)}
+	return &stream[T]{
+		value: make(chan T, size),
+		done:  make(chan struct{}),
+	}
 }

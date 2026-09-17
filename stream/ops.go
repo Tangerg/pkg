@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"errors"
 	"io"
 	"slices"
 )
@@ -92,7 +93,7 @@ func (m *multiReader[T]) Read(ctx context.Context) (v T, err error) {
 			}
 		}
 		v, err = m.readers[0].Read(ctx)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			m.readers = m.readers[1:]
 			continue
 		}
@@ -201,7 +202,7 @@ func (f *flatMapReader[T, U]) Read(ctx context.Context) (v U, err error) {
 			if err == nil {
 				return
 			}
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				f.current = nil
 				continue
 			}

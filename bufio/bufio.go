@@ -42,9 +42,19 @@ func ScanLinesAllFormats(data []byte, atEOF bool) (advance int, token []byte, er
 		// Otherwise consume the earlier terminator.
 		i := min(n, r)
 		return i + 1, dropCR(data[:i]), nil
-	case n >= 0 || r >= 0:
-		i := max(n, r)
-		return i + 1, dropCR(data[:i]), nil
+	case n >= 0:
+		// A newline terminates the line. Return immediately even when
+		// !atEOF so a trailing newline is never held back waiting for
+		// more data.
+		return n + 1, dropCR(data[:n]), nil
+	case r >= 0:
+		// A lone carriage return. If it is the final byte and more data
+		// may follow, the next byte could be a newline forming a CRLF
+		// pair, so ask for more input instead of emitting a token now.
+		if r == len(data)-1 && !atEOF {
+			return 0, nil, nil
+		}
+		return r + 1, dropCR(data[:r]), nil
 	case atEOF:
 		// Final line without terminator.
 		return len(data), data, nil

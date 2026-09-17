@@ -5,9 +5,10 @@ import (
 	"sync"
 )
 
-// SyncSet provides a thread-safe wrapper around any Set implementation.
-// It uses a read-write mutex to allow concurrent reads while ensuring
-// exclusive access for write operations.
+// SyncSet provides a thread-safe wrapper around a private copy of another
+// set's elements. It uses a read-write mutex to allow concurrent reads while
+// ensuring exclusive access for write operations; see NewSyncSet for the
+// copying semantics.
 //
 // The implementation is designed to minimize lock contention:
 //   - Read operations (Contains, Size, etc.) use read locks
@@ -19,18 +20,23 @@ type SyncSet[T comparable] struct {
 }
 
 // NewSyncSet creates a new thread-safe set wrapper.
-// If a Set is provided, it wraps that set; otherwise, it creates a new HashSet.
+// If a Set is provided, its elements are copied into the wrapper (via Clone,
+// which preserves the source's iteration order for a LinkedSet); otherwise a
+// new HashSet is used as the backing store.
 // If the provided set is already a SyncSet, it returns the same instance
 // to avoid double-wrapping.
 //
+// The source set is never retained by the wrapper: the caller may keep using
+// it freely, and changes made to it afterwards are not visible through the
+// wrapper. Conversely, operations on the wrapper do not affect the source.
+// Use the wrapper for all subsequent access if you want a single coherent view
+// of the set.
+//
 // Examples:
 //
-//	SyncSet := NewSyncSet[int]()                    // wraps a new HashSet
-//	SyncSet := NewSyncSet(NewLinkedSet[string]())   // wraps a LinkedSet
+//	SyncSet := NewSyncSet[int]()                    // uses a new HashSet
+//	SyncSet := NewSyncSet(NewLinkedSet[string]())   // copies a LinkedSet
 //	SyncSet := NewSyncSet(existingSyncSet)          // returns existingSyncSet
-//
-// The wrapped set should not be accessed directly after wrapping to maintain
-// thread safety guarantees.
 func NewSyncSet[T comparable](sets ...Set[T]) *SyncSet[T] {
 	var inner Set[T]
 	for _, s := range sets {
@@ -155,10 +161,12 @@ func (s *SyncSet[T]) Clear() {
 // This approach avoids holding locks during iteration, which could
 // cause deadlocks or performance issues with long-running iterations.
 //
-// The snapshot is taken at the moment Iter() is called, so changes
-// made to the set during iteration won't be reflected in the iteration.
-// This provides a consistent view but means the iteration might not
-// reflect the current state of the set.
+// Iter() only returns the iterator function; the snapshot is taken when the
+// iteration actually starts (when the returned function is first invoked),
+// not when Iter() is called. Changes made to the set between the Iter() call
+// and the start of iteration are therefore visible, while mutations that
+// happen after the iteration has started are not reflected. This provides a
+// consistent view for the duration of the iteration.
 //
 // Example:
 //

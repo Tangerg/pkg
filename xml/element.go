@@ -375,10 +375,6 @@ func extractElementContent(element string, eleName string) []byte {
 
 // ExtractElementContent is the public method to extract element content automatically.
 func ExtractElementContent(element string) ([]byte, error) {
-	//if !isValidElementSyntax(element) {
-	//	return nil, errors.New("invalid element syntax")
-	//}
-
 	name := extractElementName(element)
 	if name.Local == "" {
 		return nil, errors.New("empty element name")

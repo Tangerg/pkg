@@ -35,8 +35,9 @@ func NewPanicError(info any, stack []byte) error {
 }
 
 // Go runs fn in a new goroutine. If fn panics, each handler is invoked
-// with a [*PanicError] describing the panic. Handlers that themselves
-// panic do not propagate.
+// with a [*PanicError] describing the panic. Each handler runs in its
+// own recover, so a panicking handler neither propagates nor prevents
+// the remaining handlers from running.
 //
 // If fn is nil, Go does nothing.
 //
@@ -57,8 +58,9 @@ func Go(fn func(), handlers ...func(error)) {
 
 // WithRecover returns a function that runs fn with panic recovery.
 // On panic, each handler is called with a [*PanicError]; if no handler
-// is given, the panic is silently swallowed. Handler panics are also
-// recovered and discarded.
+// is given, the panic is silently swallowed. Each handler is invoked
+// under its own recover, so a panicking handler is discarded without
+// preventing the remaining handlers from running.
 //
 // WithRecover returns nil if fn is nil. It is useful when you want
 // recovery without spawning a goroutine.
@@ -73,9 +75,11 @@ func WithRecover(fn func(), handlers ...func(error)) func() {
 				return
 			}
 			err := NewPanicError(r, debug.Stack())
-			defer func() { _ = recover() }()
 			for _, h := range handlers {
-				h(err)
+				func() {
+					defer func() { _ = recover() }()
+					h(err)
+				}()
 			}
 		}()
 		fn()

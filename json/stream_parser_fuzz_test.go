@@ -31,10 +31,14 @@ func FuzzStreamParser(f *testing.F) {
 		parser, err := NewStreamParser(StreamParserConfig{
 			Reader:     bytes.NewReader(data),
 			BufferSize: 16,
-			OnObject:   func(map[string]any) error { return nil },
-			OnArray:    func([]any) error { return nil },
-			OnValue:    func(any) error { return nil },
-			OnError:    func(error) {},
+			// Small limits so arbitrary input exercises the cap and depth
+			// abort paths, not just well-formed documents.
+			MaxBufferSize: 64,
+			MaxDepth:      4,
+			OnObject:      func(map[string]any) error { return nil },
+			OnArray:       func([]any) error { return nil },
+			OnValue:       func(any) error { return nil },
+			OnError:       func(error) {},
 		})
 		if err != nil {
 			return

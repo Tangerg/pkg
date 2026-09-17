@@ -588,3 +588,114 @@ func BenchmarkStreamReadOnly(b *testing.B) {
 		s.Read(ctx)
 	}
 }
+
+// TestStreamCloseReleasesBlockedWriter verifies Close is not wedged by a
+// writer blocked on a full channel: the writer fails with ErrStreamClosed,
+// no goroutine stays parked, and the reader observes io.EOF.
+func TestStreamCloseReleasesBlockedWriter(t *testing.T) {
+	s := NewStream[int](0) // unbuffered: a write blocks until a reader arrives
+
+	writeErr := make(chan error, 1)
+	go func() {
+		writeErr <- s.Write(context.Background(), 1)
+	}()
+
+	// Give the writer time to park on the send.
+	time.Sleep(10 * time.Millisecond)
+
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close() error = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close() blocked on a blocked writer")
+	}
+
+	select {
+	case err := <-writeErr:
+		if !errors.Is(err, ErrStreamClosed) {
+			t.Errorf("blocked Write() error = %v, want ErrStreamClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked Write() was not released by Close")
+	}
+
+	ctx := context.Background()
+	if _, err := s.Read(ctx); !errors.Is(err, io.EOF) {
+		t.Errorf("Read() after Close = %v, want io.EOF", err)
+	}
+	if err := s.Close(); !errors.Is(err, ErrStreamClosed) {
+		t.Errorf("second Close() = %v, want ErrStreamClosed", err)
+	}
+}
+
+// TestStreamWriteAfterCloseWithActiveReader verifies that once Close has
+// returned, writes fail deterministically even while a reader drains the
+// values that were already accepted.
+func TestStreamWriteAfterCloseWithActiveReader(t *testing.T) {
+	s := NewStream[int](4)
+	ctx := context.Background()
+
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for {
+			if _, err := s.Read(ctx); err != nil {
+				return
+			}
+		}
+	}()
+
+	if err := s.Write(ctx, 1); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	<-drained
+
+	for i := 0; i < 3; i++ {
+		if err := s.Write(ctx, i); !errors.Is(err, ErrStreamClosed) {
+			t.Errorf("Write() after Close = %v, want ErrStreamClosed", err)
+		}
+	}
+}
+
+// TestStreamCloseDrainsAcceptedValues verifies the documented close contract:
+// values accepted before Close stay readable in order, io.EOF follows the last
+// one, and the race between the buffered-value case and the closed case in Read
+// never drops a value.
+func TestStreamCloseDrainsAcceptedValues(t *testing.T) {
+	ctx := context.Background()
+
+	// Repeat so the select in Read exercises the closed branch even when a
+	// buffered value is also ready, which the runtime decides at random.
+	for round := 0; round < 100; round++ {
+		s := NewStream[int](4)
+		for i := range 3 {
+			if err := s.Write(ctx, i); err != nil {
+				t.Fatalf("Write(%d) error = %v, want nil", i, err)
+			}
+		}
+		if err := s.Close(); err != nil {
+			t.Fatalf("Close() error = %v, want nil", err)
+		}
+
+		for i := range 3 {
+			value, err := s.Read(ctx)
+			if err != nil {
+				t.Fatalf("Read() #%d after Close = %v, want a buffered value", i, err)
+			}
+			if value != i {
+				t.Fatalf("Read() #%d after Close = %d, want %d", i, value, i)
+			}
+		}
+		if _, err := s.Read(ctx); !errors.Is(err, io.EOF) {
+			t.Fatalf("Read() after draining = %v, want io.EOF", err)
+		}
+	}
+}

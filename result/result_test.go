@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 var errSentinel = errors.New("sentinel")
@@ -165,4 +167,20 @@ func BenchmarkResult(b *testing.B) {
 			_ = Map(r, fn)
 		}
 	})
+}
+
+// TestResult_ChainedValueReceiver ensures the accessors are callable on
+// unaddressable values, e.g. New(1, nil).Get().
+func TestResult_ChainedValueReceiver(t *testing.T) {
+	v, err := New(1, nil).Get()
+	require.NoError(t, err)
+	require.Equal(t, 1, v)
+	require.NoError(t, New(1, nil).Error())
+	require.Equal(t, 1, New(1, nil).Value())
+	require.Equal(t, "value: 1", New(1, nil).String())
+
+	got, err := Error[int](errSentinel).Get()
+	require.ErrorIs(t, err, errSentinel)
+	require.Zero(t, got)
+	require.Equal(t, "error: sentinel", Error[int](errSentinel).String())
 }

@@ -89,7 +89,8 @@ func TestStreamScannerConfig_Validate(t *testing.T) {
 	}
 }
 
-// TestStreamScannerConfig_ApplyDefaults verifies zero fields get defaults.
+// TestStreamScannerConfig_ApplyDefaults verifies zero fields get defaults and
+// that a caller-supplied text buffer cap is left alone.
 func TestStreamScannerConfig_ApplyDefaults(t *testing.T) {
 	cfg := StreamScannerConfig{
 		Listeners: []*ElementListener{{Name: Name{Local: "a"}}},
@@ -98,6 +99,25 @@ func TestStreamScannerConfig_ApplyDefaults(t *testing.T) {
 	assert.Equal(t, 256, cfg.MaxNestingLevel)
 	assert.Equal(t, 4096, cfg.BufferSize)
 	assert.Equal(t, 1024, cfg.Listeners[0].MaxBufferSize)
+	assert.Equal(t, 1<<20, cfg.MaxTextBufferSize)
+
+	t.Run("positive_value_kept", func(t *testing.T) {
+		custom := StreamScannerConfig{
+			MaxTextBufferSize: 2048,
+			Listeners:         []*ElementListener{{Name: Name{Local: "a"}}},
+		}
+		custom.ApplyDefaults()
+		assert.Equal(t, 2048, custom.MaxTextBufferSize)
+	})
+
+	t.Run("negative_disables_cap", func(t *testing.T) {
+		unlimited := StreamScannerConfig{
+			MaxTextBufferSize: -1,
+			Listeners:         []*ElementListener{{Name: Name{Local: "a"}}},
+		}
+		unlimited.ApplyDefaults()
+		assert.Equal(t, -1, unlimited.MaxTextBufferSize)
+	})
 }
 
 // TestStreamScanner_ParseTrackedElements verifies a nested tracked document
@@ -267,18 +287,20 @@ func TestStreamScanner_BufferOverflowStrict(t *testing.T) {
 }
 
 // TestStreamScanner_BufferOverflowNonStrict verifies non-strict mode reports
-// overflow through OnError, keeps parsing, and still completes the element
-// with the content accumulated so far.
+// overflow through OnError, keeps parsing, and completes the element with the
+// content accumulated before the cap was reached: everything past the limit is
+// dropped.
 func TestStreamScanner_BufferOverflowNonStrict(t *testing.T) {
 	var errs []string
 	var names []Element
+	var others []Element
 	scan(t, StreamScannerConfig{
 		Listeners: []*ElementListener{
 			{Name: Name{Local: "name"}, MaxBufferSize: 8, OnComplete: func(e Element) error {
 				names = append(names, e)
 				return nil
 			}},
-			captureListener("other", &[]Element{}),
+			captureListener("other", &others),
 		},
 		OnError: func(err error) {
 			errs = append(errs, err.Error())
@@ -288,7 +310,328 @@ func TestStreamScanner_BufferOverflowNonStrict(t *testing.T) {
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0], "element buffer overflow")
 	require.Len(t, names, 1)
-	assert.Equal(t, `<name>AB</name>`, names[0].String())
+	// The byte that would reach the 8-byte limit is dropped; the closing
+	// `</name>` is appended by the pop path, outside the capped write.
+	assert.Equal(t, `<name>A</name>`, names[0].String())
+	// Parsing continues with the element following the truncated one.
+	require.Len(t, others, 1)
+	assert.Equal(t, `<other>OK</other>`, others[0].String())
+}
+
+// TestStreamScanner_TextBufferOverflowNonStrict verifies that text outside
+// tracked elements is capped, that the overflow is reported once, and that
+// parsing continues with the truncated text.
+func TestStreamScanner_TextBufferOverflowNonStrict(t *testing.T) {
+	var errs []string
+	var texts []string
+	var names []Element
+	scan(t, StreamScannerConfig{
+		MaxTextBufferSize: 16,
+		Listeners:         []*ElementListener{captureListener("name", &names)},
+		OnText: func(s string) error {
+			texts = append(texts, s)
+			return nil
+		},
+		OnError: func(err error) {
+			errs = append(errs, err.Error())
+		},
+	}, strings.Repeat("x", 1000)+`<name>ok</name>`)
+
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "text buffer overflow")
+	require.Len(t, texts, 1)
+	assert.LessOrEqual(t, len(texts[0]), 16)
+	assert.Equal(t, strings.Repeat("x", len(texts[0])), texts[0], "only the leading payload bytes may be buffered")
+	require.Len(t, names, 1)
+	assert.Equal(t, `<name>ok</name>`, names[0].String())
+}
+
+// TestStreamScanner_TextBufferOverflowStrict verifies that strict mode aborts
+// the scan once the out-of-element text cap is reached.
+func TestStreamScanner_TextBufferOverflowStrict(t *testing.T) {
+	scanner, err := NewStreamScanner(StreamScannerConfig{
+		StrictMode:        true,
+		MaxTextBufferSize: 16,
+		Listeners:         []*ElementListener{captureListener("name", &[]Element{})},
+	})
+	require.NoError(t, err)
+
+	err = scanner.Scan(strings.NewReader(strings.Repeat("x", 1000) + `<name>ok</name>`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "text buffer overflow")
+}
+
+// TestStreamScanner_TextBufferUnlimited verifies that a negative
+// MaxTextBufferSize disables the out-of-element text cap.
+func TestStreamScanner_TextBufferUnlimited(t *testing.T) {
+	var texts []string
+	var errs []string
+	payload := strings.Repeat("x", 1000)
+	scan(t, StreamScannerConfig{
+		MaxTextBufferSize: -1,
+		Listeners:         []*ElementListener{captureListener("name", &[]Element{})},
+		OnText: func(s string) error {
+			texts = append(texts, s)
+			return nil
+		},
+		OnError: func(err error) {
+			errs = append(errs, err.Error())
+		},
+	}, payload)
+
+	assert.Empty(t, errs)
+	assert.Equal(t, []string{payload}, texts)
+}
+
+// TestStreamScanner_TextCapIgnoredInsideScope verifies that the text cap only
+// applies outside tracked elements: element content is governed by the
+// listener's MaxBufferSize instead.
+func TestStreamScanner_TextCapIgnoredInsideScope(t *testing.T) {
+	var errs []string
+	var names []Element
+	scan(t, StreamScannerConfig{
+		MaxTextBufferSize: 4,
+		Listeners:         []*ElementListener{captureListener("name", &names)},
+		OnError: func(err error) {
+			errs = append(errs, err.Error())
+		},
+	}, `<name>abcdefghij</name>`)
+
+	assert.Empty(t, errs)
+	require.Len(t, names, 1)
+	assert.Equal(t, []string{"abcdefghij"}, contentStrings(names[0].Contents))
+}
+
+// TestStreamScanner_BufferOverflowReportsOnce verifies that the element cap
+// refuses every write past the limit but reports the overflow only once, so a
+// long body cannot flood OnError with one error per dropped byte.
+func TestStreamScanner_BufferOverflowReportsOnce(t *testing.T) {
+	var errs []string
+	var names []Element
+	scan(t, StreamScannerConfig{
+		Listeners: []*ElementListener{
+			{Name: Name{Local: "name"}, MaxBufferSize: 8, OnComplete: func(e Element) error {
+				names = append(names, e)
+				return nil
+			}},
+		},
+		OnError: func(err error) {
+			errs = append(errs, err.Error())
+		},
+	}, `<name>`+strings.Repeat("A", 100)+`</name>`)
+
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "element buffer overflow")
+	require.Len(t, names, 1)
+	assert.Equal(t, `<name>A</name>`, names[0].String())
+}
+
+// maxScopeBufferedBytes reports the most bytes held by any single open scope
+// buffer, i.e. the buffers [ElementListener.MaxBufferSize] bounds.
+func maxScopeBufferedBytes(p *StreamScanner) int {
+	maxLen := 0
+	for _, buffer := range p.stack.buffer {
+		if n := buffer.Len(); n > maxLen {
+			maxLen = n
+		}
+	}
+	return maxLen
+}
+
+// sampleCaps feeds payload to scanner in small chunks and reports the largest
+// element buffer it ever held, checking the caps after every chunk. processChunk
+// is used instead of Scan so the buffers stay inspectable.
+func sampleCaps(t *testing.T, p *StreamScanner, payload string) int {
+	t.Helper()
+	const chunk = 64
+	peak := 0
+	for i := 0; i < len(payload); i += chunk {
+		require.NoError(t, p.processChunk([]byte(payload[i:min(i+chunk, len(payload))])))
+		peak = max(peak, maxScopeBufferedBytes(p))
+	}
+	return peak
+}
+
+// TestStreamScanner_ScopeCapCoversNestedUntrackedContent verifies that content
+// buffered for an element no listener tracks is charged against the cap of the
+// tracked element enclosing it: nesting cannot buffer past that cap.
+func TestStreamScanner_ScopeCapCoversNestedUntrackedContent(t *testing.T) {
+	const limit = 32
+	var errs []string
+	scanner, err := NewStreamScanner(StreamScannerConfig{
+		Listeners: []*ElementListener{
+			{Name: Name{Local: "item"}, MaxBufferSize: limit, OnComplete: func(Element) error { return nil }},
+		},
+		OnError: func(err error) { errs = append(errs, err.Error()) },
+	})
+	require.NoError(t, err)
+
+	peak := sampleCaps(t, scanner, `<item><unknown>`+strings.Repeat("x", 4096)+`</unknown></item>`)
+
+	assert.LessOrEqual(t, peak, limit, "buffered bytes must stay within the enclosing element's cap")
+	require.Len(t, errs, 2, "the untracked scope and its enclosing scope each report once")
+	for _, msg := range errs {
+		assert.Contains(t, msg, "element buffer overflow")
+	}
+}
+
+// TestStreamScanner_ScopeCapCoversMismatchedClosingTag verifies that the text of
+// a closing tag that does not match the open element is charged against that
+// element's cap instead of being appended without limit.
+func TestStreamScanner_ScopeCapCoversMismatchedClosingTag(t *testing.T) {
+	const limit = 32
+	var errs []string
+	scanner, err := NewStreamScanner(StreamScannerConfig{
+		Listeners: []*ElementListener{
+			{Name: Name{Local: "item"}, MaxBufferSize: limit, OnComplete: func(Element) error { return nil }},
+		},
+		OnError: func(err error) { errs = append(errs, err.Error()) },
+	})
+	require.NoError(t, err)
+
+	peak := sampleCaps(t, scanner, `<item>`+strings.Repeat(`</zzz>`, 500))
+
+	assert.LessOrEqual(t, peak, limit, "mismatched closing tags must not grow the buffer past the cap")
+	overflows := 0
+	for _, msg := range errs {
+		if strings.Contains(msg, "element buffer overflow") {
+			overflows++
+		}
+	}
+	assert.Equal(t, 1, overflows, "the cap is reported once, not once per dropped tag")
+}
+
+// TestStreamScanner_ScopeCapCoversChildElementText verifies that the copy of a
+// completed nested element handed to its enclosing scope is charged against the
+// enclosing cap.
+func TestStreamScanner_ScopeCapCoversChildElementText(t *testing.T) {
+	const (
+		outerLimit = 16
+		innerLimit = 128
+	)
+	var errs []string
+	scanner, err := NewStreamScanner(StreamScannerConfig{
+		Listeners: []*ElementListener{
+			{Name: Name{Local: "item"}, MaxBufferSize: outerLimit, OnComplete: func(Element) error { return nil }},
+			{Name: Name{Local: "sub"}, MaxBufferSize: innerLimit, EmitAlways: true, OnComplete: func(Element) error { return nil }},
+		},
+		OnError: func(err error) { errs = append(errs, err.Error()) },
+	})
+	require.NoError(t, err)
+
+	payload := `<item><sub>` + strings.Repeat("y", 100) + `</sub></item>`
+	peak := 0
+	for i := 0; i < len(payload); i += 16 {
+		require.NoError(t, scanner.processChunk([]byte(payload[i:min(i+16, len(payload))])))
+		if scanner.stack.len() > 0 {
+			peak = max(peak, scanner.stack.buffer[0].Len())
+		}
+	}
+
+	assert.LessOrEqual(t, peak, outerLimit, "the nested element's text must not grow the outer buffer past its cap")
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "element buffer overflow")
+}
+
+// TestStreamScanner_TextCapCoversStrayClosingTag verifies that a closing tag with
+// no open element is charged against the text cap like any other passed-through
+// text.
+func TestStreamScanner_TextCapCoversStrayClosingTag(t *testing.T) {
+	const maxText = 16
+	var errs []string
+	var texts []string
+	scanner, err := NewStreamScanner(StreamScannerConfig{
+		MaxTextBufferSize: maxText,
+		Listeners:         []*ElementListener{captureListener("item", &[]Element{})},
+		OnText:            func(s string) error { texts = append(texts, s); return nil },
+		OnError:           func(err error) { errs = append(errs, err.Error()) },
+	})
+	require.NoError(t, err)
+
+	// Space padding makes one closing tag longer than the cap while its name
+	// still matches a listener, which is what routes it here with no open scope.
+	require.NoError(t, scanner.processChunk([]byte(`</item`+strings.Repeat(" ", 64)+`>`)))
+
+	assert.LessOrEqual(t, scanner.buffers.text.Len(), maxText)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "text buffer overflow")
+	assert.Empty(t, texts, "a stray closing tag past the cap is dropped, not passed through")
+}
+
+// TestStreamScanner_TextCapCoversUnclosedRemainder verifies that the remainder of
+// an element left open at end of input is charged against the text cap, the same
+// as the text it is reported as.
+func TestStreamScanner_TextCapCoversUnclosedRemainder(t *testing.T) {
+	const maxText = 16
+	var errs []string
+	var texts []string
+	scanner, err := NewStreamScanner(StreamScannerConfig{
+		MaxTextBufferSize: maxText,
+		Listeners: []*ElementListener{
+			{Name: Name{Local: "item"}, MaxBufferSize: 128, OnComplete: func(Element) error { return nil }},
+		},
+		OnText:  func(s string) error { texts = append(texts, s); return nil },
+		OnError: func(err error) { errs = append(errs, err.Error()) },
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, scanner.processChunk([]byte(`<item>`+strings.Repeat("x", 64))))
+	require.NoError(t, scanner.finalize())
+
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "text buffer overflow")
+	assert.Empty(t, texts, "an unclosed remainder past the cap is dropped, not truncated into the buffer")
+}
+
+// TestStreamScanner_TagCapCoversUnterminatedTag verifies that the tag being read
+// is capped too: an unterminated tag must not grow without bound even though no
+// element or text is buffered yet. The cap is the largest one configured, here
+// the listener's.
+func TestStreamScanner_TagCapCoversUnterminatedTag(t *testing.T) {
+	const (
+		maxText = 8
+		tagCap  = 16
+	)
+	var errs []string
+	scanner, err := NewStreamScanner(StreamScannerConfig{
+		MaxTextBufferSize: maxText,
+		Listeners: []*ElementListener{
+			{Name: Name{Local: "item"}, MaxBufferSize: tagCap, OnComplete: func(Element) error { return nil }},
+		},
+		OnError: func(err error) { errs = append(errs, err.Error()) },
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, scanner.processChunk([]byte("<"+strings.Repeat("x", 4096))))
+
+	assert.LessOrEqual(t, scanner.buffers.element.Len(), tagCap)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "tag buffer overflow")
+}
+
+// TestStreamScanner_TagCapCoversRepeatedOpenAngle verifies that a '<' arriving
+// while a tag is already open is capped too: a run of '<' must not grow the tag
+// buffer without bound.
+func TestStreamScanner_TagCapCoversRepeatedOpenAngle(t *testing.T) {
+	const (
+		maxText = 8
+		tagCap  = 16
+	)
+	var errs []string
+	scanner, err := NewStreamScanner(StreamScannerConfig{
+		MaxTextBufferSize: maxText,
+		Listeners: []*ElementListener{
+			{Name: Name{Local: "item"}, MaxBufferSize: tagCap, OnComplete: func(Element) error { return nil }},
+		},
+		OnError: func(err error) { errs = append(errs, err.Error()) },
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, scanner.processChunk([]byte(strings.Repeat("<", 4096))))
+
+	assert.LessOrEqual(t, scanner.buffers.element.Len(), tagCap)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0], "tag buffer overflow")
 }
 
 // TestStreamScanner_NestingLevelExceededStrict verifies strict mode aborts
@@ -445,6 +788,42 @@ func TestStreamScanner_ReadError(t *testing.T) {
 	err = scanner.Scan(&errorReader{err: readErr})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "read error")
+}
+
+// eofWithDataReader returns its whole payload together with io.EOF on the first
+// Read call, which io.Reader explicitly allows.
+type eofWithDataReader struct {
+	data []byte
+	done bool
+}
+
+// Read implements io.Reader, reporting data and io.EOF in a single call.
+func (r *eofWithDataReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data)
+	if n < len(r.data) {
+		r.data = r.data[n:]
+		return n, nil
+	}
+	r.done = true
+	return n, io.EOF
+}
+
+// TestStreamScanner_DataWithEOF verifies that bytes returned together with
+// io.EOF are parsed instead of being dropped.
+func TestStreamScanner_DataWithEOF(t *testing.T) {
+	var items []Element
+	scanner, err := NewStreamScanner(StreamScannerConfig{
+		Listeners: []*ElementListener{captureListener("item", &items)},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, scanner.Scan(&eofWithDataReader{data: []byte(`<r><item>a</item></r>`)}))
+	require.Len(t, items, 1)
+	assert.Equal(t, `<item>a</item>`, items[0].String())
+	assert.Equal(t, []string{"a"}, contentStrings(items[0].Contents))
 }
 
 // TestStreamScanner_ReuseAfterReset verifies a scanner can be reused across

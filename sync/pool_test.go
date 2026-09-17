@@ -11,6 +11,7 @@ import (
 	"github.com/gammazero/workerpool"
 	"github.com/panjf2000/ants/v2"
 	conc "github.com/sourcegraph/conc/pool"
+	"github.com/stretchr/testify/require"
 )
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
@@ -803,4 +804,63 @@ func ExampleSetDefaultPool() {
 	}
 
 	wg.Wait()
+}
+
+// customPool is a local [Pool] implementation used to exercise
+// [SetDefaultPool] with an arbitrary concrete type.
+type customPool struct {
+	submitted int
+}
+
+// Submit implements [Pool].
+func (c *customPool) Submit(f func()) error {
+	c.submitted++
+	f()
+	return nil
+}
+
+// TestPoolOfWorkerpool_StoppedReturnsError verifies that submitting to a
+// stopped workerpool returns an error instead of panicking.
+func TestPoolOfWorkerpool_StoppedReturnsError(t *testing.T) {
+	wp := workerpool.New(1)
+	pool := PoolOfWorkerpool(wp)
+	wp.Stop()
+
+	err := pool.Submit(func() {})
+	require.Error(t, err)
+	require.ErrorIs(t, err, workerpool.ErrStopped)
+}
+
+// TestNewFutureTaskAndRunWithPool_StoppedWorkerpool verifies the future
+// helper surfaces the stopped-pool error rather than panicking.
+func TestNewFutureTaskAndRunWithPool_StoppedWorkerpool(t *testing.T) {
+	wp := workerpool.New(1)
+	pool := PoolOfWorkerpool(wp)
+	wp.Stop()
+
+	ft, err := NewFutureTaskAndRunWithPool[int](func(<-chan struct{}) (int, error) {
+		return 1, nil
+	}, pool)
+	require.Error(t, err)
+	require.ErrorIs(t, err, workerpool.ErrStopped)
+	require.Nil(t, ft)
+}
+
+// TestSetDefaultPool_CustomImplementation verifies any [Pool] concrete
+// type can be installed as the default without an atomic.Value type
+// mismatch.
+func TestSetDefaultPool_CustomImplementation(t *testing.T) {
+	defer SetDefaultPool(PoolOfNoPool())
+
+	custom := &customPool{}
+	require.NotPanics(t, func() { SetDefaultPool(custom) })
+	require.Equal(t, custom, DefaultPool())
+
+	// A second, different concrete type must also be accepted.
+	require.NotPanics(t, func() { SetDefaultPool(PoolOfNoPool()) })
+	require.NotNil(t, DefaultPool())
+
+	// Reinstalling the custom implementation still works.
+	SetDefaultPool(custom)
+	require.Equal(t, custom, DefaultPool())
 }

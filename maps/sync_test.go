@@ -3,6 +3,7 @@ package maps
 import (
 	"fmt"
 	"math/rand"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1104,6 +1105,441 @@ func TestStdSyncMap_StressConcurrentOperations(t *testing.T) {
 
 	wg.Wait()
 	// Test passes if no panics occur
+}
+
+// =============================================================================
+// Uncomparable Values, Callback Reentrancy and Bulk-Copy Deadlocks
+// =============================================================================
+
+// runWithTimeout runs fn in its own goroutine and fails the test when fn does
+// not return in time, so a deadlock surfaces as a failure instead of a hang.
+func runWithTimeout(t *testing.T, d time.Duration, fn func()) {
+	t.Helper()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("operation did not finish within %v (deadlock?)", d)
+	}
+}
+
+// TestStdSyncMap_UncomparableValues verifies that the comparison-based
+// operations work for value types that do not support ==: sync.Map's own
+// CompareAndSwap / CompareAndDelete panic on those, so none of these paths may
+// reach them.
+func TestStdSyncMap_UncomparableValues(t *testing.T) {
+	t.Run("RemoveIf", func(t *testing.T) {
+		m := NewStdSyncMap[string, []int]()
+		m.Put("k", []int{1, 2})
+
+		if m.RemoveIf("k", []int{3}) {
+			t.Error("RemoveIf() = true for a different value, want false")
+		}
+		if !m.RemoveIf("k", []int{1, 2}) {
+			t.Error("RemoveIf() = false for the current value, want true")
+		}
+		if _, exists := m.Get("k"); exists {
+			t.Error("key still present after RemoveIf")
+		}
+	})
+
+	t.Run("Replace", func(t *testing.T) {
+		m := NewStdSyncMap[string, []int]()
+		m.Put("k", []int{1})
+
+		oldValue, replaced := m.Replace("k", []int{2})
+		if !replaced || !reflect.DeepEqual(oldValue, []int{1}) {
+			t.Errorf("Replace() = (%v, %v), want ([1], true)", oldValue, replaced)
+		}
+		if value, _ := m.Get("k"); !reflect.DeepEqual(value, []int{2}) {
+			t.Errorf("Get() = %v, want [2]", value)
+		}
+		if _, replaced := m.Replace("missing", []int{3}); replaced {
+			t.Error("Replace() on a missing key reported a replacement")
+		}
+	})
+
+	t.Run("ReplaceIf", func(t *testing.T) {
+		m := NewStdSyncMap[string, []int]()
+		m.Put("k", []int{1})
+
+		if m.ReplaceIf("k", []int{2}, []int{3}) {
+			t.Error("ReplaceIf() = true for a different old value, want false")
+		}
+		if !m.ReplaceIf("k", []int{1}, []int{3}) {
+			t.Error("ReplaceIf() = false for the current value, want true")
+		}
+		if value, _ := m.Get("k"); !reflect.DeepEqual(value, []int{3}) {
+			t.Errorf("Get() = %v, want [3]", value)
+		}
+	})
+
+	t.Run("Compute", func(t *testing.T) {
+		m := NewStdSyncMap[string, []int]()
+		m.Put("k", []int{1})
+
+		value, ok := m.Compute("k", func(_ string, old []int, exists bool) ([]int, bool) {
+			if !exists {
+				t.Error("Compute() did not report the existing entry")
+			}
+			return append(old, 2), true
+		})
+		if !ok || !reflect.DeepEqual(value, []int{1, 2}) {
+			t.Errorf("Compute() = (%v, %v), want ([1 2], true)", value, ok)
+		}
+
+		_, ok = m.Compute("k", func(_ string, _ []int, _ bool) ([]int, bool) {
+			return nil, false
+		})
+		if ok {
+			t.Error("Compute() = true after the remapping returned false, want false")
+		}
+		if _, exists := m.Get("k"); exists {
+			t.Error("Compute() with shouldPut=false kept the entry")
+		}
+	})
+
+	t.Run("ComputeIfPresent", func(t *testing.T) {
+		m := NewStdSyncMap[string, []int]()
+		m.Put("k", []int{1})
+
+		value, ok := m.ComputeIfPresent("k", func(_ string, old []int) []int {
+			return append(old, 9)
+		})
+		if !ok || !reflect.DeepEqual(value, []int{1, 9}) {
+			t.Errorf("ComputeIfPresent() = (%v, %v), want ([1 9], true)", value, ok)
+		}
+		if _, ok := m.ComputeIfPresent("missing", func(_ string, old []int) []int {
+			return old
+		}); ok {
+			t.Error("ComputeIfPresent() on a missing key = true, want false")
+		}
+	})
+
+	t.Run("Merge", func(t *testing.T) {
+		m := NewStdSyncMap[string, []int]()
+
+		if value := m.Merge("k", []int{1}, func(old, new []int) []int {
+			return append(old, new...)
+		}); !reflect.DeepEqual(value, []int{1}) {
+			t.Errorf("Merge() on a missing key = %v, want [1]", value)
+		}
+
+		value := m.Merge("k", []int{2}, func(old, new []int) []int {
+			return append(old, new...)
+		})
+		if !reflect.DeepEqual(value, []int{1, 2}) {
+			t.Errorf("Merge() = %v, want [1 2]", value)
+		}
+	})
+
+	t.Run("ReplaceAll", func(t *testing.T) {
+		m := NewStdSyncMap[string, []int]()
+		m.Put("a", []int{1})
+		m.Put("b", []int{2})
+
+		m.ReplaceAll(func(_ string, old []int) []int {
+			return append(old, 0)
+		})
+
+		for key, want := range map[string][]int{"a": {1, 0}, "b": {2, 0}} {
+			if value, _ := m.Get(key); !reflect.DeepEqual(value, want) {
+				t.Errorf("Get(%q) = %v, want %v", key, value, want)
+			}
+		}
+		m.ForEach(func(key string, value []int) {
+			if len(value) != 2 || value[1] != 0 {
+				t.Errorf("ForEach(%q) = %v, want the replaced value", key, value)
+			}
+		})
+	})
+}
+
+// TestStdSyncMap_NilValues verifies that a stored nil value round-trips: the
+// value type is an interface here, so the nil interface is stored as such and
+// must not turn into a failed type assertion.
+func TestStdSyncMap_NilValues(t *testing.T) {
+	t.Run("nil value", func(t *testing.T) {
+		m := NewStdSyncMap[string, any]()
+		m.Put("k", nil)
+
+		value, exists := m.Get("k")
+		if value != nil || !exists {
+			t.Errorf("Get() = (%v, %v), want (nil, true)", value, exists)
+		}
+		if !m.ContainsKey("k") {
+			t.Error("ContainsKey() = false for a key mapped to nil")
+		}
+		if got := m.Size(); got != 1 {
+			t.Errorf("Size() = %d, want 1", got)
+		}
+		if entries := m.Entries(); len(entries) != 1 || entries[0].Value() != nil {
+			t.Errorf("Entries() = %v, want one nil-valued entry", entries)
+		}
+		if values := m.Values(); len(values) != 1 || values[0] != nil {
+			t.Errorf("Values() = %v, want [nil]", values)
+		}
+		if keys := m.Keys(); len(keys) != 1 || keys[0] != "k" {
+			t.Errorf("Keys() = %v, want [k]", keys)
+		}
+		if !m.ContainsValue(nil) {
+			t.Error("ContainsValue(nil) = false, want true")
+		}
+		if got := m.GetOrDefault("k", "fallback"); got != nil {
+			t.Errorf("GetOrDefault() = %v, want nil", got)
+		}
+		m.ForEach(func(_ string, value any) {
+			if value != nil {
+				t.Errorf("ForEach() yielded %v, want nil", value)
+			}
+		})
+		if !m.RemoveIf("k", nil) {
+			t.Error("RemoveIf(nil) = false for a nil-valued entry, want true")
+		}
+		if m.ContainsKey("k") {
+			t.Error("key still present after RemoveIf(nil)")
+		}
+	})
+
+	t.Run("nil value replaced", func(t *testing.T) {
+		m := NewStdSyncMap[string, any]()
+		m.Put("k", nil)
+
+		oldValue, replaced := m.Replace("k", 7)
+		if oldValue != nil || !replaced {
+			t.Errorf("Replace() = (%v, %v), want (nil, true)", oldValue, replaced)
+		}
+		if value, _ := m.Get("k"); value != 7 {
+			t.Errorf("Get() = %v, want 7", value)
+		}
+
+		removed, existed := m.Remove("k")
+		if removed != 7 || !existed {
+			t.Errorf("Remove() = (%v, %v), want (7, true)", removed, existed)
+		}
+	})
+
+	t.Run("nil key", func(t *testing.T) {
+		m := NewStdSyncMap[any, string]()
+		m.Put(nil, "value")
+
+		if value, exists := m.Get(nil); value != "value" || !exists {
+			t.Errorf("Get(nil) = (%v, %v), want (value, true)", value, exists)
+		}
+		if keys := m.Keys(); len(keys) != 1 || keys[0] != nil {
+			t.Errorf("Keys() = %v, want [<nil>]", keys)
+		}
+		for key, value := range m.Iter() {
+			if key != nil || value != "value" {
+				t.Errorf("Iter() yielded (%v, %v), want (<nil>, value)", key, value)
+			}
+		}
+	})
+}
+
+// TestSyncMap_UncomparableValues verifies the mutex-based implementation
+// compares values that do not support == instead of panicking.
+func TestSyncMap_UncomparableValues(t *testing.T) {
+	t.Run("Compute", func(t *testing.T) {
+		m := NewSyncMap[string, map[string]int]()
+		m.Put("k", map[string]int{"n": 1})
+
+		value, ok := m.Compute("k", func(_ string, old map[string]int, exists bool) (map[string]int, bool) {
+			if !exists {
+				t.Error("Compute() did not report the existing entry")
+			}
+			old["n"]++
+			return old, true
+		})
+		if !ok || value["n"] != 2 {
+			t.Errorf("Compute() = (%v, %v), want (map[n:2], true)", value, ok)
+		}
+	})
+
+	t.Run("ComputeIfPresent", func(t *testing.T) {
+		m := NewSyncMap[string, []int]()
+		m.Put("k", []int{1})
+
+		value, ok := m.ComputeIfPresent("k", func(_ string, old []int) []int {
+			return append(old, 2)
+		})
+		if !ok || !reflect.DeepEqual(value, []int{1, 2}) {
+			t.Errorf("ComputeIfPresent() = (%v, %v), want ([1 2], true)", value, ok)
+		}
+	})
+
+	t.Run("Merge", func(t *testing.T) {
+		m := NewSyncMap[string, []int]()
+		m.Merge("k", []int{1}, func(old, new []int) []int { return append(old, new...) })
+		value := m.Merge("k", []int{2}, func(old, new []int) []int { return append(old, new...) })
+		if !reflect.DeepEqual(value, []int{1, 2}) {
+			t.Errorf("Merge() = %v, want [1 2]", value)
+		}
+	})
+
+	t.Run("ReplaceAll", func(t *testing.T) {
+		m := NewSyncMap[string, []int]()
+		m.Put("k", []int{1})
+
+		m.ReplaceAll(func(_ string, old []int) []int { return append(old, 2) })
+
+		if value, _ := m.Get("k"); !reflect.DeepEqual(value, []int{1, 2}) {
+			t.Errorf("Get() = %v, want [1 2]", value)
+		}
+	})
+}
+
+// TestSyncMap_ComputeRetriesStaleAttempt verifies the documented retry
+// contract: a remapping result computed for a value another writer replaced in
+// the meantime is discarded, the function runs again for the new value, and the
+// returned value is the one that was stored.
+func TestSyncMap_ComputeRetriesStaleAttempt(t *testing.T) {
+	m := NewSyncMap[string, int]()
+	m.Put("k", 1)
+
+	calls := 0
+	value, ok := m.Compute("k", func(key string, old int, exists bool) (int, bool) {
+		calls++
+		if calls == 1 {
+			// Stands in for a concurrent writer: the entry changes while the
+			// function runs, so the result computed from 1 must not be applied.
+			m.Put(key, 100)
+			return old * 10, true
+		}
+		if old != 100 {
+			t.Errorf("retry saw old value %d, want 100", old)
+		}
+		return old + 1, true
+	})
+
+	if !ok || value != 101 {
+		t.Errorf("Compute() = (%v, %v), want (101, true)", value, ok)
+	}
+	if calls != 2 {
+		t.Errorf("remapping function called %d times, want 2", calls)
+	}
+	if stored, _ := m.Get("k"); stored != 101 {
+		t.Errorf("stored value = %v, want 101", stored)
+	}
+}
+
+// TestSyncMap_CallbacksMayReenter verifies that no user callback runs while a
+// lock is held, so a callback can mutate the map it is called from.
+func TestSyncMap_CallbacksMayReenter(t *testing.T) {
+	runWithTimeout(t, 5*time.Second, func() {
+		m := NewSyncMap[string, int]()
+		m.Put("a", 1)
+		m.Put("b", 2)
+
+		m.ForEach(func(key string, value int) {
+			m.Put(key+"!", value)
+		})
+		if size := m.Size(); size != 4 {
+			t.Errorf("Size() after ForEach mutation = %d, want 4", size)
+		}
+
+		m.ReplaceAll(func(key string, value int) int {
+			m.Put(key+"?", value)
+			return value * 10
+		})
+		if value, _ := m.Get("a"); value != 10 {
+			t.Errorf("Get(a) = %v, want 10", value)
+		}
+		if _, exists := m.Get("a?"); !exists {
+			t.Error("ReplaceAll callback could not add a key")
+		}
+	})
+}
+
+// TestSyncMap_ReplaceAllKeepsConcurrentRemovals verifies that a value computed
+// for an entry that was removed while the callback ran is not written back.
+func TestSyncMap_ReplaceAllKeepsConcurrentRemovals(t *testing.T) {
+	m := NewSyncMap[string, int]()
+	m.Put("a", 1)
+	m.Put("b", 2)
+
+	m.ReplaceAll(func(key string, value int) int {
+		if key == "b" {
+			// Stands in for another goroutine removing the entry during the
+			// callback: the entry must not be resurrected afterwards.
+			m.Remove("b")
+		}
+		return value * 10
+	})
+
+	if _, exists := m.Get("b"); exists {
+		t.Error("ReplaceAll resurrected an entry removed while the callback ran")
+	}
+	if value, _ := m.Get("a"); value != 10 {
+		t.Errorf("Get(a) = %v, want 10", value)
+	}
+}
+
+// TestSyncMap_PutAllSelf verifies a map can copy into itself without
+// deadlocking, and that the copy is a no-op for its own entries.
+func TestSyncMap_PutAllSelf(t *testing.T) {
+	runWithTimeout(t, 5*time.Second, func() {
+		m := NewSyncMap[string, int]()
+		m.Put("a", 1)
+		m.Put("b", 2)
+
+		m.PutAll(m)
+
+		if size := m.Size(); size != 2 {
+			t.Errorf("Size() after PutAll(self) = %d, want 2", size)
+		}
+		if value, _ := m.Get("a"); value != 1 {
+			t.Errorf("Get(a) = %v, want 1", value)
+		}
+	})
+}
+
+// TestSyncMap_PutAllCopyIsBatched verifies the source snapshot is taken before
+// the destination lock, so two maps copying into each other concurrently cannot
+// deadlock, and a nil source is a no-op.
+func TestSyncMap_PutAllCopyIsBatched(t *testing.T) {
+	runWithTimeout(t, 5*time.Second, func() {
+		first := NewSyncMap[string, int]()
+		second := NewSyncMap[string, int]()
+		first.Put("a", 1)
+		second.Put("b", 2)
+
+		var wg sync.WaitGroup
+		for i := 0; i < 10; i++ {
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				first.PutAll(second)
+			}()
+			go func() {
+				defer wg.Done()
+				second.PutAll(first)
+			}()
+		}
+		wg.Wait()
+
+		for key, want := range map[string]int{"a": 1, "b": 2} {
+			if value, exists := first.Get(key); !exists || value != want {
+				t.Errorf("first.Get(%q) = (%v, %v), want (%v, true)", key, value, exists, want)
+			}
+			if value, exists := second.Get(key); !exists || value != want {
+				t.Errorf("second.Get(%q) = (%v, %v), want (%v, true)", key, value, exists, want)
+			}
+		}
+	})
+
+	m := NewSyncMap[string, int]()
+	m.Put("a", 1)
+	m.PutAll(nil)
+	if size := m.Size(); size != 1 {
+		t.Errorf("Size() after PutAll(nil) = %d, want 1", size)
+	}
 }
 
 // =============================================================================

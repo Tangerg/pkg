@@ -26,6 +26,54 @@ import (
 	"sync"
 )
 
+// valuesEqual reports whether a and b hold equal values.
+//
+// Values whose dynamic type supports == are compared with ==, which is cheap
+// and gives the same answer for the scalar types most maps use. Values whose
+// dynamic type does not support == (slices, maps, funcs, or structs containing
+// them) fall back to [reflect.DeepEqual].
+//
+// The dynamic-type check matters: comparing two interface values that hold the
+// same uncomparable type with == panics with "runtime error: comparing
+// uncomparable type", which is exactly what sync.Map's CompareAndSwap and
+// CompareAndDelete do internally. Because [Map] leaves V unconstrained, every
+// comparison-based operation has to go through this helper to stay usable with
+// all the value types [HashMap] and [LinkedMap] accept.
+func valuesEqual[V any](a, b V) bool {
+	if isComparableValue(a) && isComparableValue(b) {
+		return any(a) == any(b)
+	}
+	return reflect.DeepEqual(a, b)
+}
+
+// isComparableValue reports whether the dynamic type stored in v supports ==,
+// i.e. whether comparing two interface values holding it is safe. Nil is
+// trivially comparable: sync.Map handles the nil interface itself, while a
+// direct == on it is not even reached.
+func isComparableValue(v any) bool {
+	return v == nil || reflect.TypeOf(v).Comparable()
+}
+
+// unwrap returns the value a sync.Map holds for a key, given the type it was
+// stored with.
+//
+// A plain v.(T) panics when T is an interface type and the stored value is the
+// nil interface: a nil interface has no dynamic type to assert. The comma-ok
+// form maps that case to the zero value, which is precisely the value that was
+// stored, and it cannot hide a mismatched type: every entry of the underlying
+// sync.Map was stored by this type as a K or a V.
+func unwrap[T any](v any) T {
+	t, _ := v.(T)
+	return t
+}
+
+// pendingEntry is a key paired with a value computed while no lock was held,
+// used by [SyncMap.ReplaceAll] to apply its snapshot under a single write lock.
+type pendingEntry[K comparable, V any] struct {
+	key   K
+	value V
+}
+
 // SyncMap provides a thread-safe wrapper around any Map implementation.
 // It uses a read-write mutex to allow concurrent reads while ensuring
 // exclusive access for write operations.
@@ -34,24 +82,32 @@ import (
 //   - Read operations (Get, ContainsKey, Size, etc.) use read locks
 //   - Write operations (Put, Remove, etc.) use write locks
 //   - Iteration creates a snapshot to avoid holding locks during iteration
+//
+// User-supplied callbacks (ForEach, ReplaceAll, Compute, ComputeIfAbsent,
+// ComputeIfPresent, Merge) are never invoked while the mutex is held, so a
+// callback may call back into the same map, including through mutating
+// methods, without self-deadlocking.
 type SyncMap[K comparable, V any] struct {
 	inner Map[K, V]    // The underlying Map implementation
 	mutex sync.RWMutex // Read-write mutex for thread safety
 }
 
 // NewSyncMap creates a new thread-safe map wrapper.
-// If a Map is provided, it wraps that map; otherwise, it creates a new HashMap.
-// If the provided map is already a SyncMap, it returns the same instance
-// to avoid double-wrapping.
+// If a Map is provided, its entries are copied into the wrapper (via Clone,
+// which preserves the source's iteration order for a LinkedMap); otherwise a
+// new HashMap is used as the backing store.
+// If the provided map is already a SyncMap or a StdSyncMap, it returns that
+// same instance to avoid double-wrapping.
 //
 // Examples:
 //
-//	SyncMap := NewSyncMap[string, int]()                     // wraps a new HashMap
-//	SyncMap := NewSyncMap(NewLinkedMap[string, int]())       // wraps a LinkedMap
+//	SyncMap := NewSyncMap[string, int]()                     // uses a new HashMap
+//	SyncMap := NewSyncMap(NewLinkedMap[string, int]())       // copies a LinkedMap
 //	SyncMap := NewSyncMap(existingSyncMap)                   // returns existingSyncMap
 //
-// The wrapped map should not be accessed directly after wrapping to maintain
-// thread safety guarantees.
+// The source map is never retained by the wrapper: the caller may keep using it
+// freely, and changes made to it afterwards are not visible through the
+// wrapper. Conversely, operations on the wrapper do not affect the source.
 func NewSyncMap[K comparable, V any](maps ...Map[K, V]) Map[K, V] {
 	var inner Map[K, V] = make(HashMap[K, V])
 
@@ -147,13 +203,30 @@ func (s *SyncMap[K, V]) Clear() {
 	s.inner.Clear()
 }
 
-// PutAll safely adds multiple key-value pairs with exclusive access.
-// The entire operation is atomic - either all applicable pairs
-// are added or none are (in case of panic).
+// PutAll safely copies all mappings from other into this map.
+//
+// The source is snapshotted before this map's write lock is taken: that is
+// what removes the lock-order inversion between two SyncMaps copying into each
+// other, and it also lets s.PutAll(s) complete. The snapshot is then applied
+// under a single write lock, so from the point of view of other writers the
+// copy lands as one batch. A nil other is a no-op.
+//
+// Entries written to other after PutAll was called are not part of the
+// snapshot and are therefore not copied.
 func (s *SyncMap[K, V]) PutAll(other Map[K, V]) {
+	if other == nil {
+		return
+	}
+
+	// Snapshot the source before locking this map: other may be this map or
+	// another SyncMap whose lock must not be held while locked here.
+	entries := other.Entries()
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	s.inner.PutAll(other)
+	for _, entry := range entries {
+		s.inner.Put(entry.Key(), entry.Value())
+	}
 }
 
 // Keys safely returns all keys as a snapshot.
@@ -184,13 +257,23 @@ func (s *SyncMap[K, V]) Entries() []*Entry[K, V] {
 }
 
 // ForEach safely iterates over all key-value pairs.
-// The entire iteration holds a read lock, so the action function
-// should be fast to avoid blocking writers for too long.
-// For long-running operations, consider using Iter() instead.
+//
+// The entries are snapshotted under a read lock and the lock is released
+// before any action is called, so action runs without any lock held: it may
+// call back into this map, including through mutating methods such as Put or
+// Remove, without deadlocking.
+//
+// The iteration therefore reflects the state of the map at the moment ForEach
+// was called; writes made while it runs, by action itself or by other
+// goroutines, are not visited by that call.
 func (s *SyncMap[K, V]) ForEach(action func(K, V)) {
 	s.mutex.RLock()
-	defer s.mutex.RUnlock()
-	s.inner.ForEach(action)
+	entries := s.inner.Entries()
+	s.mutex.RUnlock()
+
+	for _, entry := range entries {
+		action(entry.Key(), entry.Value())
+	}
 }
 
 // Default Value Related Methods
@@ -239,44 +322,194 @@ func (s *SyncMap[K, V]) ReplaceIf(key K, oldValue, newValue V) bool {
 
 // Functional Operation Methods
 
-// Compute safely computes a new mapping with exclusive access.
-// Uses a write lock as this may be a mutating operation.
+// The Compute/ComputeIfAbsent/ComputeIfPresent/Merge family all follow the same
+// locking contract:
+//
+//   - The user-supplied function is always called with no lock held, so it may
+//     call back into the map, including through mutating methods.
+//   - The function is invoked against a value read under a read lock, and its
+//     result is applied under a write lock only if the entry is still the one
+//     the function was given. When the entry changed meanwhile the operation
+//     retries, which means the function may be invoked more than once under
+//     concurrent writes, and a function that writes the very key it is
+//     computing for never converges: keep it a pure function of its arguments.
+//
+// Compute attempts to compute a mapping for the specified key and its current
+// mapped value (or the zero value if there is no current mapping).
+//
+// The remappingFunction receives the key, the current value, and whether the
+// key exists; it runs without any lock held and may call back into this map.
+// See the family note above for the concurrency contract. The return values
+// match HashMap.Compute: (zero, false) when the key ends up absent.
 func (s *SyncMap[K, V]) Compute(key K, remappingFunction func(K, V, bool) (V, bool)) (V, bool) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	return s.inner.Compute(key, remappingFunction)
+	for {
+		s.mutex.RLock()
+		oldValue, exists := s.inner.Get(key)
+		s.mutex.RUnlock()
+
+		newValue, shouldPut := remappingFunction(key, oldValue, exists)
+
+		s.mutex.Lock()
+		currentValue, currentExists := s.inner.Get(key)
+		if currentExists != exists || (exists && !valuesEqual(currentValue, oldValue)) {
+			// The entry changed while the function ran: retry against the
+			// state the function will be given next instead of clobbering it.
+			s.mutex.Unlock()
+			continue
+		}
+
+		var result V
+		var applied bool
+		switch {
+		case shouldPut:
+			s.inner.Put(key, newValue)
+			result, applied = newValue, true
+		case exists:
+			// The remapping returned false for an existing mapping: remove it.
+			s.inner.Remove(key)
+		}
+
+		s.mutex.Unlock()
+		return result, applied
+	}
 }
 
-// ComputeIfAbsent safely computes a value if absent with exclusive access.
-// Uses a write lock as this may be a mutating operation.
+// ComputeIfAbsent computes a value for the specified key if the key is not
+// already associated with a value, and associates it with the computed value.
+// Returns the current (existing or computed) value associated with the key.
+//
+// The mappingFunction runs without any lock held and may call back into this
+// map. If another writer associates the key first, the value it stored wins and
+// the computed value is discarded.
 func (s *SyncMap[K, V]) ComputeIfAbsent(key K, mappingFunction func(K) V) V {
+	s.mutex.RLock()
+	value, exists := s.inner.Get(key)
+	s.mutex.RUnlock()
+	if exists {
+		return value
+	}
+
+	newValue := mappingFunction(key)
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	return s.inner.ComputeIfAbsent(key, mappingFunction)
+
+	// Re-check under the write lock: never overwrite a value that appeared
+	// while the mapping function was running.
+	if currentValue, currentExists := s.inner.Get(key); currentExists {
+		return currentValue
+	}
+	s.inner.Put(key, newValue)
+	return newValue
 }
 
-// ComputeIfPresent safely computes a new value if present with exclusive access.
-// Uses a write lock as this may be a mutating operation.
+// ComputeIfPresent computes a new mapping for the specified key if the key is
+// currently mapped to a value in this map. Returns the new value and true if
+// the mapping was updated, otherwise returns zero value and false.
+//
+// The remappingFunction runs without any lock held and may call back into this
+// map. See the family note above for the concurrency contract; the function is
+// not called at all when the key is absent.
 func (s *SyncMap[K, V]) ComputeIfPresent(key K, remappingFunction func(K, V) V) (V, bool) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	return s.inner.ComputeIfPresent(key, remappingFunction)
+	for {
+		s.mutex.RLock()
+		oldValue, exists := s.inner.Get(key)
+		s.mutex.RUnlock()
+		if !exists {
+			var zero V
+			return zero, false
+		}
+
+		newValue := remappingFunction(key, oldValue)
+
+		s.mutex.Lock()
+		currentValue, stillExists := s.inner.Get(key)
+		switch {
+		case stillExists && valuesEqual(currentValue, oldValue):
+			s.inner.Put(key, newValue)
+			s.mutex.Unlock()
+			return newValue, true
+		case stillExists:
+			// The entry changed while the function ran: retry.
+			s.mutex.Unlock()
+			continue
+		default:
+			// The entry disappeared: nothing left to compute.
+			s.mutex.Unlock()
+			var zero V
+			return zero, false
+		}
+	}
 }
 
-// Merge safely merges values with exclusive access.
-// Uses a write lock as this may be a mutating operation.
+// Merge associates the specified value with the specified key if the key is not
+// already associated with a value. If the key is already associated with a
+// value, replaces the associated value with the results of the given remapping
+// function. Returns the new value associated with the key.
+//
+// The remappingFunction runs without any lock held and may call back into this
+// map. See the family note above for the concurrency contract; the function is
+// not called when the key is absent.
 func (s *SyncMap[K, V]) Merge(key K, value V, remappingFunction func(V, V) V) V {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	return s.inner.Merge(key, value, remappingFunction)
+	for {
+		s.mutex.RLock()
+		oldValue, exists := s.inner.Get(key)
+		s.mutex.RUnlock()
+
+		if !exists {
+			s.mutex.Lock()
+			if _, appeared := s.inner.Get(key); !appeared {
+				s.inner.Put(key, value)
+				s.mutex.Unlock()
+				return value
+			}
+			// Another writer inserted the key: retry so the remapping
+			// function gets a chance to merge into that value.
+			s.mutex.Unlock()
+			continue
+		}
+
+		newValue := remappingFunction(oldValue, value)
+
+		s.mutex.Lock()
+		currentValue, stillExists := s.inner.Get(key)
+		if stillExists && valuesEqual(currentValue, oldValue) {
+			s.inner.Put(key, newValue)
+			s.mutex.Unlock()
+			return newValue
+		}
+		// The entry changed or disappeared while the function ran: retry.
+		s.mutex.Unlock()
+	}
 }
 
-// ReplaceAll safely replaces all values with exclusive access.
-// Uses a write lock as this is a mutating operation.
+// ReplaceAll replaces each entry's value with the result of invoking the given
+// function on that entry's key and value.
+//
+// The function is evaluated for every entry of a snapshot taken under a read
+// lock, with no lock held, so it may call back into this map. The computed
+// values are then applied under a single write lock, and only for keys that
+// still exist: an entry removed while the function ran is not resurrected.
+// Values written concurrently by other goroutines are overwritten; the last
+// writer wins.
 func (s *SyncMap[K, V]) ReplaceAll(function func(K, V) V) {
+	s.mutex.RLock()
+	entries := s.inner.Entries()
+	s.mutex.RUnlock()
+
+	pending := make([]pendingEntry[K, V], 0, len(entries))
+	for _, entry := range entries {
+		key, value := entry.Key(), entry.Value()
+		pending = append(pending, pendingEntry[K, V]{key: key, value: function(key, value)})
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	s.inner.ReplaceAll(function)
+	for _, p := range pending {
+		if s.inner.ContainsKey(p.key) {
+			s.inner.Put(p.key, p.value)
+		}
+	}
 }
 
 // Iterator Methods - Use snapshots to avoid holding locks during iteration
@@ -285,10 +518,11 @@ func (s *SyncMap[K, V]) ReplaceAll(function func(K, V) V) {
 // This approach avoids holding locks during iteration, which could
 // cause deadlocks or performance issues with long-running iterations.
 //
-// The snapshot is taken at the moment Iter() is called, so changes
-// made to the map during iteration won't be reflected in the iteration.
-// This provides a consistent view but means the iteration might not
-// reflect the current state of the map.
+// The snapshot is taken when the iteration starts (when the range loop begins
+// running the returned iterator), not when Iter() is called, so changes made to
+// the map during iteration are not reflected in that iteration. Writes from
+// other goroutines and mutations performed by the loop body are both invisible
+// to it, which is what makes iterating while mutating safe.
 //
 // Example:
 //
@@ -361,13 +595,77 @@ func (s *SyncMap[K, V]) Clone() Map[K, V] {
 	}
 }
 
-// StdSyncMap is a thread-safe Map interface implementation based on Go's standard library sync.Map.
-// It provides concurrent access safety for all operations, making it suitable
-// for use in multi-goroutine environments. The underlying sync.Map is optimized
-// for scenarios where entries are only ever written once but read many times,
-// or when multiple goroutines read, write, and overwrite entries for disjoint sets of keys.
+// StdSyncMap is a thread-safe Map interface implementation based on Go's
+// standard library sync.Map. It provides concurrent access safety for all
+// operations, making it suitable for use in multi-goroutine environments. The
+// underlying sync.Map is optimized for scenarios where entries are only ever
+// written once but read many times, or when multiple goroutines read, write,
+// and overwrite entries for disjoint sets of keys.
+//
+// V may be any type, including slices, maps and funcs, and K may hold the nil
+// interface: the comparison-based operations (RemoveIf, Replace, ReplaceIf,
+// Compute, ComputeIfPresent, Merge, ReplaceAll) compare values through
+// [valuesEqual] and unwrap stored entries through [unwrap] instead of handing
+// values to sync.Map's CompareAndSwap / CompareAndDelete, which panic on
+// uncomparable dynamic types.
+//
+// Comparable values keep sync.Map's atomic compare-and-swap, which is atomic
+// with respect to every other write to the map. Uncomparable values cannot use
+// it and instead serialize with each other through mu: a concurrent
+// [StdSyncMap.Put] or [StdSyncMap.Remove] of the same key may land between that
+// comparison and the store and be overwritten by it.
 type StdSyncMap[K comparable, V any] struct {
 	m sync.Map
+
+	// mu serializes the compare-based operations for uncomparable values, which
+	// cannot use sync.Map's atomic primitives without risking a panic. Read
+	// paths (Get, ContainsKey, Size, ...) stay lock-free, and user callbacks
+	// are never invoked while mu is held.
+	mu sync.Mutex
+}
+
+// compareAndSwap stores newValue under key if the key is present and still
+// holds oldValue, reporting whether it did.
+//
+// It is the comparison-safe replacement for sync.Map.CompareAndSwap: comparable
+// values (including a nil oldValue, which sync.Map distinguishes from an absent
+// key on its own) keep the atomic primitive; uncomparable ones are compared
+// with [valuesEqual] under mu, where the primitive would panic.
+func (s *StdSyncMap[K, V]) compareAndSwap(key K, oldValue, newValue V) bool {
+	if isComparableValue(oldValue) {
+		return s.m.CompareAndSwap(key, oldValue, newValue)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current, exists := s.m.Load(key)
+	if !exists || !valuesEqual(unwrap[V](current), oldValue) {
+		return false
+	}
+	s.m.Store(key, newValue)
+	return true
+}
+
+// compareAndDelete removes key if it is present and still holds oldValue,
+// reporting whether it did.
+//
+// It is the comparison-safe replacement for sync.Map.CompareAndDelete, split
+// the same way as [StdSyncMap.compareAndSwap].
+func (s *StdSyncMap[K, V]) compareAndDelete(key K, oldValue V) bool {
+	if isComparableValue(oldValue) {
+		return s.m.CompareAndDelete(key, oldValue)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current, exists := s.m.Load(key)
+	if !exists || !valuesEqual(unwrap[V](current), oldValue) {
+		return false
+	}
+	s.m.Delete(key)
+	return true
 }
 
 // NewStdSyncMap creates a new thread-safe StdSyncMap instance.
@@ -380,7 +678,7 @@ func NewStdSyncMap[K comparable, V any]() *StdSyncMap[K, V] {
 // This operation is thread-safe and can be called concurrently from multiple goroutines.
 func (s *StdSyncMap[K, V]) Put(key K, value V) (V, bool) {
 	if oldValue, exists := s.m.Swap(key, value); exists {
-		return oldValue.(V), true
+		return unwrap[V](oldValue), true
 	}
 	var zero V
 	return zero, false
@@ -390,7 +688,7 @@ func (s *StdSyncMap[K, V]) Put(key K, value V) (V, bool) {
 // This operation is thread-safe and optimized for concurrent reads.
 func (s *StdSyncMap[K, V]) Get(key K) (V, bool) {
 	if value, exists := s.m.Load(key); exists {
-		return value.(V), true
+		return unwrap[V](value), true
 	}
 	var zero V
 	return zero, false
@@ -400,7 +698,7 @@ func (s *StdSyncMap[K, V]) Get(key K) (V, bool) {
 // This operation is thread-safe and can be called concurrently.
 func (s *StdSyncMap[K, V]) Remove(key K) (V, bool) {
 	if value, exists := s.m.LoadAndDelete(key); exists {
-		return value.(V), true
+		return unwrap[V](value), true
 	}
 	var zero V
 	return zero, false
@@ -419,7 +717,7 @@ func (s *StdSyncMap[K, V]) ContainsKey(key K) bool {
 func (s *StdSyncMap[K, V]) ContainsValue(value V) bool {
 	found := false
 	s.m.Range(func(key, val any) bool {
-		if reflect.DeepEqual(val.(V), value) {
+		if valuesEqual(unwrap[V](val), value) {
 			found = true
 			return false // Stop iteration
 		}
@@ -469,7 +767,7 @@ func (s *StdSyncMap[K, V]) PutAll(other Map[K, V]) {
 func (s *StdSyncMap[K, V]) Keys() []K {
 	var keys []K
 	s.m.Range(func(key, value any) bool {
-		keys = append(keys, key.(K))
+		keys = append(keys, unwrap[K](key))
 		return true
 	})
 	return keys
@@ -480,7 +778,7 @@ func (s *StdSyncMap[K, V]) Keys() []K {
 func (s *StdSyncMap[K, V]) Values() []V {
 	var values []V
 	s.m.Range(func(key, value any) bool {
-		values = append(values, value.(V))
+		values = append(values, unwrap[V](value))
 		return true
 	})
 	return values
@@ -493,8 +791,8 @@ func (s *StdSyncMap[K, V]) Entries() []*Entry[K, V] {
 	var entries []*Entry[K, V]
 	s.m.Range(func(key, value any) bool {
 		entries = append(entries, &Entry[K, V]{
-			key:   key.(K),
-			value: value.(V),
+			key:   unwrap[K](key),
+			value: unwrap[V](value),
 		})
 		return true
 	})
@@ -506,7 +804,7 @@ func (s *StdSyncMap[K, V]) Entries() []*Entry[K, V] {
 // Note: The iteration order is not guaranteed and may vary between calls.
 func (s *StdSyncMap[K, V]) ForEach(action func(K, V)) {
 	s.m.Range(func(key, value any) bool {
-		action(key.(K), value.(V))
+		action(unwrap[K](key), unwrap[V](value))
 		return true
 	})
 }
@@ -515,7 +813,7 @@ func (s *StdSyncMap[K, V]) ForEach(action func(K, V)) {
 // or defaultValue if this map contains no mapping for the key.
 func (s *StdSyncMap[K, V]) GetOrDefault(key K, defaultValue V) V {
 	if value, exists := s.m.Load(key); exists {
-		return value.(V)
+		return unwrap[V](value)
 	}
 	return defaultValue
 }
@@ -526,50 +824,42 @@ func (s *StdSyncMap[K, V]) GetOrDefault(key K, defaultValue V) V {
 func (s *StdSyncMap[K, V]) PutIfAbsent(key K, value V) (V, bool) {
 	actual, loaded := s.m.LoadOrStore(key, value)
 	if loaded {
-		return actual.(V), false // Key already existed
+		return unwrap[V](actual), false // Key already existed
 	}
 	return value, true // Key was absent, value was stored
 }
 
 // RemoveIf removes the entry for the specified key only if it is currently
-// mapped to the specified value using deep equality comparison.
-// This operation uses compare-and-swap semantics for thread safety.
+// mapped to the specified value, compared with [valuesEqual] so that value
+// types that do not support == are usable.
 func (s *StdSyncMap[K, V]) RemoveIf(key K, value V) bool {
-	if currentValue, exists := s.m.Load(key); exists {
-		if reflect.DeepEqual(currentValue.(V), value) {
-			// Use CompareAndDelete for atomic operation
-			return s.m.CompareAndDelete(key, currentValue)
-		}
-	}
-	return false
+	return s.compareAndDelete(key, value)
 }
 
 // Replace replaces the entry for the specified key only if it is currently mapped to some value.
 // This operation uses compare-and-swap semantics for thread safety.
 func (s *StdSyncMap[K, V]) Replace(key K, value V) (V, bool) {
 	if oldValue, exists := s.m.Load(key); exists {
-		if s.m.CompareAndSwap(key, oldValue, value) {
-			return oldValue.(V), true
+		current := unwrap[V](oldValue)
+		if s.compareAndSwap(key, current, value) {
+			return current, true
 		}
-		// If CompareAndSwap failed, the value was changed by another goroutine
-		// Try to get the current value
+		// If the compare-and-swap failed, the value was changed by another
+		// goroutine. Try to get the current value.
 		if currentValue, stillExists := s.m.Load(key); stillExists {
-			return currentValue.(V), false
+			return unwrap[V](currentValue), false
 		}
 	}
 	var zero V
 	return zero, false
 }
 
-// ReplaceIf replaces the entry for the specified key only if currently mapped to the specified value.
+// ReplaceIf replaces the entry for the specified key only if currently mapped
+// to the specified value, compared with [valuesEqual] so that value types that
+// do not support == are usable.
 // This operation uses compare-and-swap semantics for thread safety.
 func (s *StdSyncMap[K, V]) ReplaceIf(key K, oldValue, newValue V) bool {
-	if currentValue, exists := s.m.Load(key); exists {
-		if reflect.DeepEqual(currentValue.(V), oldValue) {
-			return s.m.CompareAndSwap(key, currentValue, newValue)
-		}
-	}
-	return false
+	return s.compareAndSwap(key, oldValue, newValue)
 }
 
 // Compute attempts to compute a mapping for the specified key and its current mapped value.
@@ -580,7 +870,7 @@ func (s *StdSyncMap[K, V]) Compute(key K, remappingFunc func(K, V, bool) (V, boo
 		oldValue, exists := s.m.Load(key)
 		var currentValue V
 		if exists {
-			currentValue = oldValue.(V)
+			currentValue = unwrap[V](oldValue)
 		}
 
 		newValue, shouldPut := remappingFunc(key, currentValue, exists)
@@ -588,7 +878,7 @@ func (s *StdSyncMap[K, V]) Compute(key K, remappingFunc func(K, V, bool) (V, boo
 		if shouldPut {
 			if exists {
 				// Try to replace the existing value
-				if s.m.CompareAndSwap(key, oldValue, newValue) {
+				if s.compareAndSwap(key, currentValue, newValue) {
 					return newValue, true
 				}
 				// Value was changed by another goroutine, retry
@@ -604,7 +894,7 @@ func (s *StdSyncMap[K, V]) Compute(key K, remappingFunc func(K, V, bool) (V, boo
 		} else {
 			if exists {
 				// Try to delete the existing value
-				if s.m.CompareAndDelete(key, oldValue) {
+				if s.compareAndDelete(key, currentValue) {
 					var zero V
 					return zero, false
 				}
@@ -623,12 +913,12 @@ func (s *StdSyncMap[K, V]) Compute(key K, remappingFunc func(K, V, bool) (V, boo
 // This operation is atomic and thread-safe.
 func (s *StdSyncMap[K, V]) ComputeIfAbsent(key K, mappingFunction func(K) V) V {
 	if value, exists := s.m.Load(key); exists {
-		return value.(V)
+		return unwrap[V](value)
 	}
 
 	newValue := mappingFunction(key)
 	actual, _ := s.m.LoadOrStore(key, newValue)
-	return actual.(V)
+	return unwrap[V](actual)
 }
 
 // ComputeIfPresent computes a new mapping for the specified key if the key is
@@ -637,8 +927,9 @@ func (s *StdSyncMap[K, V]) ComputeIfAbsent(key K, mappingFunction func(K) V) V {
 func (s *StdSyncMap[K, V]) ComputeIfPresent(key K, remappingFunc func(K, V) V) (V, bool) {
 	for {
 		if oldValue, exists := s.m.Load(key); exists {
-			newValue := remappingFunc(key, oldValue.(V))
-			if s.m.CompareAndSwap(key, oldValue, newValue) {
+			current := unwrap[V](oldValue)
+			newValue := remappingFunc(key, current)
+			if s.compareAndSwap(key, current, newValue) {
 				return newValue, true
 			}
 			// Value was changed by another goroutine, retry
@@ -657,8 +948,9 @@ func (s *StdSyncMap[K, V]) ComputeIfPresent(key K, remappingFunc func(K, V) V) (
 func (s *StdSyncMap[K, V]) Merge(key K, value V, remappingFunc func(V, V) V) V {
 	for {
 		if oldValue, exists := s.m.Load(key); exists {
-			newValue := remappingFunc(oldValue.(V), value)
-			if s.m.CompareAndSwap(key, oldValue, newValue) {
+			current := unwrap[V](oldValue)
+			newValue := remappingFunc(current, value)
+			if s.compareAndSwap(key, current, newValue) {
 				return newValue
 			}
 			// Value was changed by another goroutine, retry
@@ -676,42 +968,26 @@ func (s *StdSyncMap[K, V]) Merge(key K, value V, remappingFunc func(V, V) V) V {
 
 // ReplaceAll replaces each entry's value with the result of invoking the given
 // function on that entry's key and value.
-// Note: This operation is not atomic across all entries but each individual
-// replacement uses compare-and-swap for consistency.
+//
+// Every entry reported by a single snapshot of the map is visited. Entries
+// removed before they are reached are skipped instead of being written back,
+// and an entry whose value another goroutine changes while the function runs is
+// re-read, so the function is applied again to the new value.
 func (s *StdSyncMap[K, V]) ReplaceAll(function func(K, V) V) {
-	// First, collect all current entries
-	var entries []struct {
-		key      K
-		oldValue any
-	}
-
-	s.m.Range(func(key, value any) bool {
-		entries = append(entries, struct {
-			key      K
-			oldValue any
-		}{key.(K), value})
-		return true
-	})
-
-	// Then, try to replace each entry
-	for _, entry := range entries {
+	for _, entry := range s.Entries() {
+		key := entry.Key()
 		for {
-			// Check if the entry still exists and has the same value
-			if currentValue, exists := s.m.Load(entry.key); exists && currentValue == entry.oldValue {
-				newValue := function(entry.key, entry.oldValue.(V))
-				if s.m.CompareAndSwap(entry.key, entry.oldValue, newValue) {
-					break // Successfully replaced
-				}
-				// Value was changed, get the new value and retry
-				if newCurrentValue, stillExists := s.m.Load(entry.key); stillExists {
-					entry.oldValue = newCurrentValue
-					continue
-				}
-				// Entry was deleted, skip it
+			current, exists := s.m.Load(key)
+			if !exists {
+				// The entry was deleted before it was reached: skip it.
 				break
 			}
-			// Entry was changed or deleted, skip it
-			break
+			oldValue := unwrap[V](current)
+			newValue := function(key, oldValue)
+			if s.compareAndSwap(key, oldValue, newValue) {
+				break
+			}
+			// The value changed while the function ran: retry against it.
 		}
 	}
 }
@@ -723,7 +999,7 @@ func (s *StdSyncMap[K, V]) ReplaceAll(function func(K, V) V) {
 func (s *StdSyncMap[K, V]) Iter() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		s.m.Range(func(key, value any) bool {
-			return yield(key.(K), value.(V))
+			return yield(unwrap[K](key), unwrap[V](value))
 		})
 	}
 }
@@ -734,7 +1010,7 @@ func (s *StdSyncMap[K, V]) Iter() iter.Seq2[K, V] {
 func (s *StdSyncMap[K, V]) IterKeys() iter.Seq[K] {
 	return func(yield func(K) bool) {
 		s.m.Range(func(key, _ any) bool {
-			return yield(key.(K))
+			return yield(unwrap[K](key))
 		})
 	}
 }
@@ -745,7 +1021,7 @@ func (s *StdSyncMap[K, V]) IterKeys() iter.Seq[K] {
 func (s *StdSyncMap[K, V]) IterValues() iter.Seq[V] {
 	return func(yield func(V) bool) {
 		s.m.Range(func(_, value any) bool {
-			return yield(value.(V))
+			return yield(unwrap[V](value))
 		})
 	}
 }

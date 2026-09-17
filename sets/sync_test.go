@@ -63,18 +63,28 @@ func TestNewSyncSet(t *testing.T) {
 		}
 	})
 
-	t.Run("clone isolation from original", func(t *testing.T) {
-		inner := NewHashSet[int]()
-		inner.Add(1)
+	t.Run("copies source elements (clone isolation)", func(t *testing.T) {
+		source := NewHashSet[int]()
+		source.Add(1)
 
-		set := NewSyncSet(inner)
-		inner.Add(2) // Modify original after wrapping
+		set := NewSyncSet(source)
+		source.Add(2) // Modify the source after copying
 
+		// Changes to the source must not be visible through the wrapper.
 		if set.Contains(2) {
-			t.Error("SyncSet should be isolated from original set modifications")
+			t.Error("SyncSet should be isolated from source modifications")
 		}
 		if set.Size() != 1 {
 			t.Errorf("Size() = %v, want 1", set.Size())
+		}
+
+		// Changes to the wrapper must not be visible through the source.
+		set.Add(3)
+		if source.Contains(3) {
+			t.Error("source set should be isolated from SyncSet modifications")
+		}
+		if source.Size() != 2 {
+			t.Errorf("source Size() = %v, want 2", source.Size())
 		}
 	})
 
@@ -599,6 +609,31 @@ func TestSyncSet_Iter(t *testing.T) {
 		// But the element should be in the set
 		if !set.Contains(4) {
 			t.Error("Contains(4) = false, want true")
+		}
+	})
+
+	t.Run("snapshot taken when iteration starts", func(t *testing.T) {
+		set := NewSyncSet[int]()
+		set.Add(1)
+
+		// Obtain the iterator function without starting the iteration.
+		it := set.Iter()
+
+		// Mutate the set after Iter() returns but before iteration begins.
+		set.Add(2)
+
+		seen := make(map[int]bool)
+		for elem := range it {
+			seen[elem] = true
+		}
+
+		// The snapshot is taken when the iteration starts, so element 2,
+		// added before iteration began, must be observed.
+		if !seen[2] {
+			t.Error("iteration should observe an element added before iteration started")
+		}
+		if len(seen) != 2 {
+			t.Errorf("observed %v elements, want 2", len(seen))
 		}
 	})
 }

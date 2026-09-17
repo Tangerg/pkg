@@ -182,3 +182,17 @@ func BenchmarkNewPanicError(b *testing.B) {
 		_ = NewPanicError("boom", stack)
 	}
 }
+
+func TestGo_PanickingHandlerDoesNotSkipOthers(t *testing.T) {
+	secondCalled := make(chan struct{})
+	Go(
+		func() { panic("fn boom") },
+		func(error) { panic("handler boom") },
+		func(error) { close(secondCalled) },
+	)
+	select {
+	case <-secondCalled:
+	case <-time.After(time.Second):
+		t.Fatal("a panicking handler skipped the remaining handlers")
+	}
+}

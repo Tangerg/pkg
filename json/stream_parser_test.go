@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -618,7 +619,7 @@ func TestStreamParser_ErrorHandling(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var parseError error
+			var parseErrors []error
 
 			config := StreamParserConfig{
 				Reader:     strings.NewReader(tt.input),
@@ -630,7 +631,7 @@ func TestStreamParser_ErrorHandling(t *testing.T) {
 					return nil
 				},
 				OnError: func(err error) {
-					parseError = err
+					parseErrors = append(parseErrors, err)
 				},
 			}
 
@@ -645,9 +646,10 @@ func TestStreamParser_ErrorHandling(t *testing.T) {
 					assert.Contains(t, err.Error(), tt.errType)
 				}
 			}
-			if parseError != nil {
-				t.Error(parseError)
-			}
+			// Parse errors are delivered to OnError before being
+			// returned, exactly once.
+			require.Len(t, parseErrors, 1, "parse errors must reach OnError exactly once")
+			assert.Equal(t, err.Error(), parseErrors[0].Error())
 		})
 	}
 }
@@ -932,4 +934,237 @@ func BenchmarkStreamParser_LargeDocument(b *testing.B) {
 		parser, _ := NewStreamParser(config)
 		_ = parser.Parse()
 	}
+}
+
+// chunkedStreamReader serves payload in chunkSize pieces so a test value
+// arrives incrementally, and it counts the bytes the parser consumed.
+type chunkedStreamReader struct {
+	payload   []byte
+	chunkSize int
+	off       int
+}
+
+// Read implements io.Reader.
+func (r *chunkedStreamReader) Read(p []byte) (int, error) {
+	if r.off >= len(r.payload) {
+		return 0, io.EOF
+	}
+	n := min(len(p), r.chunkSize, len(r.payload)-r.off)
+	copy(p, r.payload[r.off:r.off+n])
+	r.off += n
+	return n, nil
+}
+
+// consumed reports how many payload bytes the reader has handed out.
+func (r *chunkedStreamReader) consumed() int { return r.off }
+
+// TestStreamParser_MaxBufferSize verifies that the total buffered-bytes cap
+// stops an oversized in-flight value immediately instead of buffering it.
+func TestStreamParser_MaxBufferSize(t *testing.T) {
+	const limit = 1024
+
+	// `{"a":"` followed by 64 KiB of payload with no closing quote or brace:
+	// without a cap the parser would keep every byte in p.buffers[0].
+	payload := []byte(`{"a":"` + strings.Repeat("x", 64*1024))
+	reader := &chunkedStreamReader{payload: payload, chunkSize: 257}
+
+	var objects, values int
+	var notified []error
+
+	parser, err := NewStreamParser(StreamParserConfig{
+		Reader:        reader,
+		BufferSize:    512,
+		MaxBufferSize: limit,
+		OnObject: func(map[string]any) error {
+			objects++
+			return nil
+		},
+		OnValue: func(any) error {
+			values++
+			return nil
+		},
+		OnError: func(err error) {
+			notified = append(notified, err)
+		},
+	})
+	require.NoError(t, err)
+
+	err = parser.Parse()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "json: buffer limit 1024 bytes exceeded")
+	assert.Zero(t, objects, "OnObject must not fire for an aborted value")
+	assert.Zero(t, values, "OnValue must not fire for an aborted value")
+	require.Len(t, notified, 1, "the limit error reaches OnError once")
+	assert.Equal(t, err.Error(), notified[0].Error())
+
+	// Parsing stopped at the cap instead of draining the 64 KiB payload.
+	assert.LessOrEqual(t, reader.consumed(), 4*1024)
+}
+
+// TestStreamParser_MaxBufferSizeDefaults pins how zero and negative
+// MaxBufferSize values map onto "package default" and "unlimited".
+func TestStreamParser_MaxBufferSizeDefaults(t *testing.T) {
+	t.Run("zero_selects_package_default", func(t *testing.T) {
+		cfg := StreamParserConfig{Reader: strings.NewReader(`{}`)}
+		cfg.ApplyDefaults()
+		assert.Equal(t, defaultParserMaxBufferSize, cfg.MaxBufferSize)
+		assert.Equal(t, 16<<20, cfg.MaxBufferSize)
+
+		parser, err := NewStreamParser(StreamParserConfig{Reader: strings.NewReader(`{}`)})
+		require.NoError(t, err)
+		assert.Equal(t, defaultParserMaxBufferSize, parser.maxBufferSize)
+	})
+
+	t.Run("negative_means_unlimited", func(t *testing.T) {
+		cfg := StreamParserConfig{Reader: strings.NewReader(`{}`), MaxBufferSize: -1}
+		cfg.ApplyDefaults()
+		assert.Equal(t, -1, cfg.MaxBufferSize, "a negative cap stays explicitly unlimited")
+
+		var values []any
+		// A 1 MiB top-level string parses fine when the cap is disabled.
+		input := `"` + strings.Repeat("x", 1<<20) + `"`
+		parser, err := NewStreamParser(StreamParserConfig{
+			Reader:        strings.NewReader(input),
+			MaxBufferSize: -1,
+			OnValue: func(v any) error {
+				values = append(values, v)
+				return nil
+			},
+		})
+		require.NoError(t, err)
+		assert.Less(t, parser.maxBufferSize, 0, "negative config disables the cap")
+
+		require.NoError(t, parser.Parse())
+		require.Len(t, values, 1)
+		assert.Len(t, values[0], 1<<20)
+	})
+}
+
+// TestStreamParser_MaxDepth verifies the nesting-depth cap and its switch.
+func TestStreamParser_MaxDepth(t *testing.T) {
+	const depth = 20
+	input := strings.Repeat("[", depth) + strings.Repeat("]", depth)
+
+	t.Run("zero_selects_package_default", func(t *testing.T) {
+		var arrays int
+		parser, err := NewStreamParser(StreamParserConfig{
+			Reader:  strings.NewReader(input),
+			OnArray: func([]any) error { arrays++; return nil },
+		})
+		require.NoError(t, err)
+		assert.Equal(t, defaultParserMaxDepth, parser.maxDepth)
+
+		require.NoError(t, parser.Parse())
+		assert.Equal(t, 1, arrays)
+	})
+
+	t.Run("over_limit_errors", func(t *testing.T) {
+		var arrays int
+		var notified []error
+		parser, err := NewStreamParser(StreamParserConfig{
+			Reader:   strings.NewReader(input),
+			MaxDepth: 8,
+			OnArray:  func([]any) error { arrays++; return nil },
+			OnError:  func(err error) { notified = append(notified, err) },
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 8, parser.maxDepth)
+
+		err = parser.Parse()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "json: max depth 8 exceeded")
+		assert.Zero(t, arrays, "nothing is dispatched once the depth cap trips")
+		require.Len(t, notified, 1, "the depth error reaches OnError once")
+		assert.Equal(t, err.Error(), notified[0].Error())
+	})
+
+	t.Run("negative_disables_cap", func(t *testing.T) {
+		var arrays int
+		parser, err := NewStreamParser(StreamParserConfig{
+			Reader:   strings.NewReader(input),
+			MaxDepth: -1,
+			OnArray:  func([]any) error { arrays++; return nil },
+		})
+		require.NoError(t, err)
+		assert.Less(t, parser.maxDepth, 0, "negative config disables the cap")
+
+		require.NoError(t, parser.Parse())
+		assert.Equal(t, 1, arrays)
+	})
+}
+
+// liveBufferBytes reports how many bytes the parser currently holds across the
+// top-level buffer and every open scope.
+func liveBufferBytes(p *StreamParser) int {
+	total := p.topBuf.Len()
+	for _, buf := range p.buffers {
+		total += buf.Len()
+	}
+	return total
+}
+
+// TestStreamParser_BufferBudgetAccounting verifies p.buffered counts exactly
+// the bytes held for the in-flight value at every step — including top-level
+// bytes dropped when a value starts, the cross-scope copies made when a nested
+// value closes, and the reset after a value completes: it is the number the
+// MaxBufferSize cap is enforced on.
+func TestStreamParser_BufferBudgetAccounting(t *testing.T) {
+	inputs := []string{
+		// Nested completes, cross-scope copies, several top-level values.
+		`{"a":[1,2,{"b":"c"}],"d":1} [true,false,[]] 42 {"e":{}}`,
+		// Garbage before a scope: the top-level bytes are dropped when the
+		// scope opens, so the budget must restart with them.
+		`xyz{"a":1}`,
+		// Top-level primitives separated by commas, each flushed in turn.
+		`1,2,3`,
+		// Deep nesting, one buffer per level.
+		`[[[[1]]]]`,
+		// A string as the only top-level value.
+		`"only"`,
+	}
+
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			parser, err := NewStreamParser(StreamParserConfig{
+				Reader:        strings.NewReader(""),
+				MaxBufferSize: 4096,
+				OnArray:       func([]any) error { return nil },
+				OnObject:      func(map[string]any) error { return nil },
+				OnValue:       func(any) error { return nil },
+			})
+			require.NoError(t, err)
+
+			for i := range len(input) {
+				require.NoError(t, parser.processBytes([]byte{input[i]}), "byte %d (%q)", i, input[i])
+				require.Equal(t, liveBufferBytes(parser), parser.buffered,
+					"buffered budget after byte %d (%q)", i, input[i])
+			}
+		})
+	}
+}
+
+// TestStreamParser_MaxBufferSizeCountsOpenScopes verifies the cap counts the
+// bytes of every open nesting scope, not just the innermost buffer: a nested
+// value whose total exceeds the cap is rejected even though no single buffer
+// reaches it.
+func TestStreamParser_MaxBufferSizeCountsOpenScopes(t *testing.T) {
+	const limit = 64
+
+	// 20 one-byte scopes plus a 50-byte string: 71 buffered bytes at the
+	// deepest point, none of them in a buffer that alone reaches the cap.
+	input := strings.Repeat("[", 20) + `"` + strings.Repeat("x", 50) + `"` + strings.Repeat("]", 20)
+
+	var notified []error
+	parser, err := NewStreamParser(StreamParserConfig{
+		Reader:        strings.NewReader(input),
+		MaxBufferSize: limit,
+		OnArray:       func([]any) error { t.Error("OnArray fired for an aborted value"); return nil },
+		OnError:       func(err error) { notified = append(notified, err) },
+	})
+	require.NoError(t, err)
+
+	err = parser.Parse()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "json: buffer limit 64 bytes exceeded")
+	require.Len(t, notified, 1, "the limit error reaches OnError once")
 }

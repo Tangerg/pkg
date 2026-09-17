@@ -33,13 +33,14 @@ func FuzzStreamScanner(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		scanner, err := NewStreamScanner(StreamScannerConfig{
 			Listeners: []*ElementListener{
-				{Name: Name{Local: "name"}, OnComplete: func(Element) error { return nil }},
-				{Name: Name{Local: "person"}, OnComplete: func(Element) error { return nil }},
+				{Name: Name{Local: "name"}, MaxBufferSize: 32, OnComplete: func(Element) error { return nil }},
+				{Name: Name{Local: "person"}, MaxBufferSize: 32, OnComplete: func(Element) error { return nil }},
 			},
-			OnText:     func(string) error { return nil },
-			OnError:    func(error) {},
-			StrictMode: len(data)%2 == 0,
-			BufferSize: 7,
+			OnText:            func(string) error { return nil },
+			OnError:           func(error) {},
+			StrictMode:        len(data)%2 == 0,
+			BufferSize:        7,
+			MaxTextBufferSize: 7,
 		})
 		if err != nil {
 			return

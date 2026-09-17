@@ -20,7 +20,7 @@ import (
 // This interface provides three main implementations:
 //   - HashSet: Hash table based implementation with O(1) average performance
 //   - LinkedSet: Hash table + doubly-linked list maintaining insertion order
-//   - SyncSet: Thread-safe wrapper using read-write mutex
+//   - SyncSet: Thread-safe wrapper over a private copy of another set, using a read-write mutex
 //
 // All Set implementations work with any comparable type, providing compile-time
 // type safety.

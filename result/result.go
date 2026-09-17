@@ -26,31 +26,34 @@ func Value[T any](v T) Result[T] {
 
 // Error returns a failed Result with the given error and a zero value
 // of T.
+//
+// A nil err yields a result that reports success, indistinguishable from
+// [New]; prefer New when err may be nil.
 func Error[T any](err error) Result[T] {
 	return Result[T]{err: err}
 }
 
 // Get returns both the value and error in a single call, mirroring the
 // idiomatic Go return pair.
-func (r *Result[T]) Get() (T, error) {
+func (r Result[T]) Get() (T, error) {
 	return r.v, r.err
 }
 
 // Error returns the contained error, or nil if r is successful.
-func (r *Result[T]) Error() error {
+func (r Result[T]) Error() error {
 	return r.err
 }
 
 // Value returns the contained value. If r holds an error, the zero
 // value of T is returned; check [Result.Error] first when that matters.
-func (r *Result[T]) Value() T {
+func (r Result[T]) Value() T {
 	return r.v
 }
 
 // String returns "error: <msg>" for a failed result, or "value: <v>"
 // for a successful one. Values implementing fmt.Stringer use their
 // String method; otherwise %+v formatting is used.
-func (r *Result[T]) String() string {
+func (r Result[T]) String() string {
 	if r.err != nil {
 		return "error: " + r.err.Error()
 	}

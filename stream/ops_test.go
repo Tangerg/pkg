@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestOfSliceReader tests creating a reader from a slice
@@ -1270,4 +1272,63 @@ func BenchmarkDistinct(b *testing.B) {
 	for b.Loop() {
 		distinct.Read(ctx)
 	}
+}
+
+// wrappedEOFReader yields its values and then returns a wrapped io.EOF.
+type wrappedEOFReader[T any] struct {
+	values []T
+	i      int
+}
+
+// Read implements [Reader.Read].
+func (r *wrappedEOFReader[T]) Read(context.Context) (T, error) {
+	if r.i < len(r.values) {
+		v := r.values[r.i]
+		r.i++
+		return v, nil
+	}
+	var zero T
+	return zero, fmt.Errorf("upstream: %w", io.EOF)
+}
+
+// TestMultiReader_WrappedEOF verifies MultiReader treats a wrapped EOF as
+// end-of-stream and advances to the next reader.
+func TestMultiReader_WrappedEOF(t *testing.T) {
+	ctx := context.Background()
+	m := MultiReader[int](
+		&wrappedEOFReader[int]{values: []int{1, 2}},
+		&wrappedEOFReader[int]{values: []int{3, 4}},
+	)
+
+	var got []int
+	for {
+		v, err := m.Read(ctx)
+		if err != nil {
+			require.ErrorIs(t, err, io.EOF)
+			break
+		}
+		got = append(got, v)
+	}
+	require.Equal(t, []int{1, 2, 3, 4}, got)
+}
+
+// TestFlatMap_WrappedEOF verifies FlatMap treats a wrapped EOF from a
+// sub-reader as end-of-stream and advances to the next source value.
+func TestFlatMap_WrappedEOF(t *testing.T) {
+	ctx := context.Background()
+	src := &wrappedEOFReader[int]{values: []int{1, 2}}
+	fm := FlatMap(src, func(n int) Reader[string] {
+		return &wrappedEOFReader[string]{values: []string{fmt.Sprintf("%d", n)}}
+	})
+
+	var got []string
+	for {
+		v, err := fm.Read(ctx)
+		if err != nil {
+			require.ErrorIs(t, err, io.EOF)
+			break
+		}
+		got = append(got, v)
+	}
+	require.Equal(t, []string{"1", "2"}, got)
 }

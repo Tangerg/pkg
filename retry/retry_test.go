@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,6 +22,11 @@ func noSleep() func(time.Duration) <-chan time.Time {
 		ch <- time.Now()
 		return ch
 	}
+}
+
+// neverSleep never fires, so only the context case can win the select.
+func neverSleep() func(time.Duration) <-chan time.Time {
+	return func(time.Duration) <-chan time.Time { return make(chan time.Time) }
 }
 
 func TestDefaultStrategy(t *testing.T) {
@@ -101,18 +107,47 @@ func TestDo_Unlimited(t *testing.T) {
 func TestDo_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	calls := 0
+	// The sleep case must stop being ready once the context is canceled:
+	// with both cases ready the select picks at random and the assertions
+	// below flake.
+	sleep := func(time.Duration) <-chan time.Time {
+		ch := make(chan time.Time, 1)
+		if ctx.Err() == nil {
+			ch <- time.Now()
+		}
+		return ch
+	}
 	err := Do(func() error {
 		calls++
 		if calls == 2 {
 			cancel()
 		}
 		return errTemporary
-	}, WithContext(ctx), WithMaxAttempts(10), WithSleep(noSleep()))
+	}, WithContext(ctx), WithMaxAttempts(10), WithSleep(sleep))
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
-	if calls < 2 {
-		t.Errorf("calls = %d, want >= 2", calls)
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2", calls)
+	}
+}
+
+func TestDo_ContextCancelledUnlimited(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	calls := 0
+	err := Do(func() error {
+		calls++
+		cancel()
+		return errTemporary
+	}, WithContext(ctx), WithUnlimitedAttempts(), WithSleep(neverSleep()))
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "unlimited retry mode") {
+		t.Errorf("err = %v, want unlimited-mode message", err)
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1", calls)
 	}
 }
 

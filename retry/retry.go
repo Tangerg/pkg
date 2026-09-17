@@ -241,13 +241,19 @@ func FixedDelay(_ int, _ error, cfg DelayConfig) time.Duration {
 	return cfg.BaseDelay
 }
 
+// randInt64N is the jitter source for [RandomJitter] and
+// [FullJitterBackoff]. It is a variable so tests can substitute a
+// deterministic sequence: jitter is the only nondeterministic input to
+// delay computation, and math/rand/v2 exposes no seedable global source.
+var randInt64N = rand.Int64N
+
 // RandomJitter returns a uniform random duration in [0, MaxJitter).
 // Returns 0 if MaxJitter <= 0.
 func RandomJitter(_ int, _ error, cfg DelayConfig) time.Duration {
 	if cfg.MaxJitter <= 0 {
 		return 0
 	}
-	return time.Duration(rand.Int64N(int64(cfg.MaxJitter)))
+	return time.Duration(randInt64N(int64(cfg.MaxJitter)))
 }
 
 // FullJitterBackoff returns a uniform random duration in
@@ -270,7 +276,7 @@ func FullJitterBackoff(attempt int, _ error, cfg DelayConfig) time.Duration {
 	if ceiling <= 0 {
 		return 0
 	}
-	return time.Duration(rand.Int64N(int64(ceiling)))
+	return time.Duration(randInt64N(int64(ceiling)))
 }
 
 // CombineDelays returns a delay function whose result is the sum of

@@ -29,3 +29,22 @@
 - **加新子包**:先问"stdlib 为什么不够" —— 只在 stdlib 真不够或跨业务模块要复用时才加。
 - **改 exported API**:宁可加新函数也别改老签名;**任何破坏性改动先咨询 scope + 影响面**。
 - **改 XML / JSON parser 的 buffer 上限**:跑 fuzz,覆盖恶意 LLM 输出。
+
+## 非显然决策与易错点（记忆）
+
+> 逐条来自实际改动;违反往往不被现有测试立刻发现,故固化于此。
+
+- **maps 值比较只有一个入口**:`HashMap` / `LinkedMap` / `SyncMap` / `StdSyncMap` 的含值比较(`ContainsValue`、`RemoveIf`、`ReplaceIf`、`Compute` 族、`ReplaceAll`)一律走 `maps.valuesEqual`(可比较动态类型用 `==`,否则 `reflect.DeepEqual`)。禁止新增裸 `reflect.DeepEqual`:不可比较值会变慢,而 `sync.Map` 的 `CompareAndSwap` / `CompareAndDelete` 对 nil 接口或不可比较值会 panic。`StdSyncMap` 另用 `unwrap[T]`(comma-ok)避开 nil 接口断言 panic。
+- **并发 map 回调不持锁**:`SyncMap` / `StdSyncMap` 的 `ForEach`、`ReplaceAll`、`Compute` 族在**无锁**下调用用户函数,允许回调重入同一 map;`StdSyncMap` 走 CAS 重试,回调可能被调用多次,必须是参数的纯函数。`PutAll` 先对 source 取快照再上写锁,避免两个 `SyncMap` 互拷的锁序反转。
+- **xml 流式上限不可旁路**:`StreamScanner` 内部所有写入必须经 `appendScope` / `appendText` / `writeTagByte` 等受控 helper;元素上限(`ElementListener.MaxBufferSize`)、元素外文本上限(`MaxTextBufferSize`)、tag 暂存上限三处都要生效。动这些路径必须保留 `xml/scanner_test.go` 里的 `*CapCovers*` 回归测试。
+- **json 流式计费**:`stream_parser.go` 的 `buffered` 对同一 top-level 值跨作用域只计一次,值完成 / 丢弃后归零;所有解析器错误必须经 `fail` 恰好上报 `OnError` 一次,`OnError` 不接收用户回调或 reader 的错误。
+- **text.Lines 语义**:对齐 `bufio.ScanLines`(去尾部 `\r`、无尾随空行),但**无 token 上限**——长行不截断。不要再改回 `bufio.Scanner`(其 64 KiB 上限会静默丢行)。
+
+## 改动后必跑
+
+- `gofmt -l .`、`go vet ./...`、`go test -race ./...`(并发包尤其)。
+- 改 `xml` / `json` 解析器:跑对应 `-fuzz` 目标各数秒。
+
+## 已知缺口
+
+- 仍缺 CI:AGENTS.md 要求用 CI 锁住"不 import 业务模块"这条不变量,并在 CI 跑 gofmt / vet / test -race。影响:护栏目前只靠约定,回归无自动拦截。

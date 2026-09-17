@@ -25,7 +25,7 @@ type DelayConfig struct {
 	// [RandomJitter]; 0 disables jitter.
 	MaxJitter time.Duration
 	// MaxBackoffStep caps the exponent used by exponential strategies.
-	// 0 means automatically derived from BaseDelay to avoid overflow.
+	// 0 means no cap; the delay arithmetic saturates rather than overflowing.
 	MaxBackoffStep int
 }
 
@@ -171,7 +171,7 @@ func WithMaxJitter(d time.Duration) Option {
 }
 
 // WithBackoffStep caps the exponent in exponential strategies.
-// 0 enables automatic overflow protection based on BaseDelay.
+// 0 or a negative value removes the cap.
 func WithBackoffStep(step int) Option {
 	return func(s *Strategy) {
 		if step < 0 {
@@ -222,14 +222,7 @@ func ExponentialBackoff(attempt int, _ error, cfg DelayConfig) time.Duration {
 	if attempt <= 0 || cfg.BaseDelay <= 0 {
 		return cfg.BaseDelay
 	}
-	step := attempt
-	if cfg.MaxBackoffStep > 0 && step > cfg.MaxBackoffStep {
-		step = cfg.MaxBackoffStep
-	}
-	d := cfg.BaseDelay << step
-	if d < 0 {
-		d = time.Duration(math.MaxInt64)
-	}
+	d := shiftSaturating(cfg.BaseDelay, cappedStep(attempt, cfg.MaxBackoffStep))
 	if cfg.MaxDelay > 0 && d > cfg.MaxDelay {
 		d = cfg.MaxDelay
 	}
@@ -262,25 +255,52 @@ func FullJitterBackoff(attempt int, _ error, cfg DelayConfig) time.Duration {
 	if attempt <= 0 || cfg.BaseDelay <= 0 {
 		return 0
 	}
-	step := attempt
-	if cfg.MaxBackoffStep > 0 && step > cfg.MaxBackoffStep {
-		step = cfg.MaxBackoffStep
-	}
-	ceiling := cfg.BaseDelay << step
-	if ceiling < 0 {
-		ceiling = time.Duration(math.MaxInt64)
-	}
+	ceiling := shiftSaturating(cfg.BaseDelay, cappedStep(attempt, cfg.MaxBackoffStep))
 	if cfg.MaxDelay > 0 && ceiling > cfg.MaxDelay {
 		ceiling = cfg.MaxDelay
-	}
-	if ceiling <= 0 {
-		return 0
 	}
 	return time.Duration(randInt64N(int64(ceiling)))
 }
 
+// cappedStep returns attempt, capped at maxStep when maxStep is positive. This
+// is the only place that decides what MaxBackoffStep == 0 means, so the
+// "uncapped" reading cannot drift apart from the delay functions using it.
+func cappedStep(attempt, maxStep int) int {
+	if maxStep > 0 && attempt > maxStep {
+		return maxStep
+	}
+	return attempt
+}
+
+// shiftSaturating returns base<<step, saturating at math.MaxInt64 instead of
+// wrapping. base must be positive and step at least 1, which the callers
+// guarantee; the result is then always at least 2, and [FullJitterBackoff]
+// relies on that to keep a zero ceiling away from rand.Int64N, which panics on
+// a zero argument.
+func shiftSaturating(base time.Duration, step int) time.Duration {
+	if base > time.Duration(math.MaxInt64)>>step {
+		return time.Duration(math.MaxInt64)
+	}
+	return base << step
+}
+
+// addSaturating returns a+b, saturating at the int64 bounds instead of
+// wrapping. Combined delay components need not be positive, so both directions
+// have to be detected: testing against math.MaxInt64 alone reports a spurious
+// MaxInt64 as soon as a component is negative.
+func addSaturating(a, b time.Duration) time.Duration {
+	sum := a + b
+	if b > 0 && sum < a {
+		return time.Duration(math.MaxInt64)
+	}
+	if b < 0 && sum > a {
+		return time.Duration(math.MinInt64)
+	}
+	return sum
+}
+
 // CombineDelays returns a delay function whose result is the sum of
-// the supplied functions, saturating at math.MaxInt64 on overflow.
+// the supplied functions, saturating instead of wrapping on overflow.
 //
 // Example:
 //
@@ -289,28 +309,10 @@ func CombineDelays(funcs ...func(int, error, DelayConfig) time.Duration) func(in
 	return func(attempt int, err error, cfg DelayConfig) time.Duration {
 		var total time.Duration
 		for _, fn := range funcs {
-			d := fn(attempt, err, cfg)
-			if total > time.Duration(math.MaxInt64)-d {
-				return time.Duration(math.MaxInt64)
-			}
-			total += d
+			total = addSaturating(total, fn(attempt, err, cfg))
 		}
 		return total
 	}
-}
-
-// calculateMaxBackoffStep returns the largest exponent for which
-// baseDelay << step fits in time.Duration.
-func calculateMaxBackoffStep(baseDelay time.Duration) int {
-	const cap = 62 // 2^62 ns ≈ 146 years
-	if baseDelay <= 0 {
-		return cap
-	}
-	step := cap - int(math.Floor(math.Log2(float64(baseDelay))))
-	if step < 0 {
-		return 0
-	}
-	return step
 }
 
 func doRetry[T any](op OperationWithResult[T], s *Strategy) (T, error) {
@@ -356,12 +358,6 @@ func NewResultRetrier[T any](opts ...Option) *ResultRetrier[T] {
 	s := defaultStrategy()
 	for _, opt := range opts {
 		opt(s)
-	}
-	maxStep := calculateMaxBackoffStep(s.delayConfig.BaseDelay)
-	if s.delayConfig.MaxBackoffStep > 0 {
-		s.delayConfig.MaxBackoffStep = min(s.delayConfig.MaxBackoffStep, maxStep)
-	} else {
-		s.delayConfig.MaxBackoffStep = maxStep
 	}
 	return &ResultRetrier[T]{strategy: s}
 }

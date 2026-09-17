@@ -40,7 +40,8 @@
 - **json 流式计费**:`stream_parser.go` 的 `buffered` 对同一 top-level 值跨作用域只计一次,值完成 / 丢弃后归零;所有解析器错误必须经 `fail` 恰好上报 `OnError` 一次,`OnError` 不接收用户回调或 reader 的错误。
 - **text.Lines 语义**:对齐 `bufio.ScanLines`(去尾部 `\r`、无尾随空行),但**无 token 上限**——长行不截断。不要再改回 `bufio.Scanner`(其 64 KiB 上限会静默丢行)。
 - **retry 抖动的唯一随机源**:`RandomJitter` / `FullJitterBackoff` 只能经包内 `randInt64N` 变量取随机数——`math/rand/v2` 没有可播种的全局源,测试只能靠替换它拿到确定性。不要改回直接调 `rand.Int64N`。
-- **retry 的溢出检测只认负数,移位回绕能绕过它**:两个 delay 函数都用 `d < 0` 判断溢出,只看得见符号位回绕;`BaseDelay = 1<<62` 且 `attempt = 2` 时 `1<<64 ≡ 0`(**不是负数**),于是 `FullJitterBackoff` 落到 `ceiling <= 0` 那支返回 0。**该分支可达且承重**:去掉它 `rand.Int64N(0)` 直接 panic,而删掉守卫后**现有测试套件仍然全绿**——覆盖率高不代表有牙,别按覆盖率把它当死代码删。`retry/backoff_test.go` 的 `TestFullJitterBackoff_ZeroCeiling` 钉住这条路径。饱和语义本身的缺口见下。
+- **retry 的饱和算术只有一个入口**:`ExponentialBackoff` / `FullJitterBackoff` 的 `BaseDelay << step` 一律走 `shiftSaturating`,`CombineDelays` 的累加走 `addSaturating`。**不要退回 `d < 0` 那种判溢出**:移位回绕成 0 或小正数时它不是负数(`BaseDelay = 1<<62`、`attempt = 2` 时 `1<<64 ≡ 0`),会静默算出 0 延迟——即无间隔重试的死循环。`CombineDelays` 同理不能拿 `MaxInt64 - d` 当上界:分量可以为负,那个减法自身就会回绕,把 -1s 这类偏移放大成一个 292 年的 sleep。
+- **`MaxBackoffStep == 0` 只有一个含义**:uncapped,由 `cappedStep` 单点决定,`NewResultRetrier` 不再改写该字段。历史上 0 同时表示"自动派生"与"派生结果无指数可用",两个 delay 函数又拿 `MaxBackoffStep > 0` 当封顶开关,于是退化输入下反而把保护关掉了——这正是回绕能漏出去的原因。溢出改由饱和算术负责,不再需要派生上限。
 - **retry 测试不得并行**:`retry` 包用替换 `randInt64N` 的方式做确定性断言,`t.Parallel` 会与替换互相干扰。
 
 ## 改动后必跑
@@ -48,7 +49,3 @@
 - `gofmt -l .`、`go vet ./...`、`go test -race ./...`(并发包尤其)。
 - `./scripts/check-imports.sh`(依赖闭包护栏:只允许 stdlib 与 go.mod 声明的三方库,且不 import 业务模块)。
 - 改 `xml` / `json` 解析器:跑对应 `-fuzz` 目标各数秒。
-
-## 已知缺口
-
-- **retry 的"溢出饱和"名不副实**:`ExponentialBackoff` 文档承诺溢出时饱和到 `math.MaxInt64`,但只有回绕成负数那半能被检测到。实测:`ExponentialBackoff(2, nil, DelayConfig{BaseDelay: (1<<62)+1})` 返回 **4ns**(`+3` 返回 12ns);`BaseDelay = 1<<62` 配 `WithFullJitter()` 时从 attempt 2 起延迟恒为 0,等于无间隔重试。触发需要 `BaseDelay ≥ 2^62 ns`(≈146 年),现实中拿不到,所以危害有限;但**根因**值得记:`DelayConfig.MaxBackoffStep` 的 0 同时表示"自动派生"与"派生结果是无指数可用",而两个 delay 函数又拿 `MaxBackoffStep > 0` 当"是否封顶"的开关,于是在最需要保护时反而关掉了保护(见 `NewResultRetrier` 的 `calculateMaxBackoffStep` 收尾)。修它要改 exported 行为,先定契约再动。

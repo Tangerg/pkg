@@ -89,8 +89,9 @@ fmt.Println(err, attempts) // <nil> 3
 
 退避策略通过 `Option` 组合：`WithFixedDelay`（恒定）、`WithExponentialBackoff`（指数 + 抖动，
 默认）、`WithFullJitter`（AWS 风格全抖动），配合 `WithBackoffStep` 限制指数、
-`WithMaxDelay` 限制单次上限、`WithMaxJitter` 控制抖动幅度。`WithSleep` 可替换等待实现，
-便于测试；`WithContext` 让整个重试受上下文约束。
+`WithMaxDelay` 限制单次上限、`WithMaxJitter` 控制抖动幅度。指数计算在溢出时饱和到
+`math.MaxInt64` 而不是回绕，`MaxBackoffStep` 为 0 表示不限制指数。
+`WithSleep` 可替换等待实现，便于测试；`WithContext` 让整个重试受上下文约束。
 
 ### 并发原语
 

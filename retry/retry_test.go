@@ -384,24 +384,6 @@ func TestStrategyOptions_NilFunctionsIgnored(t *testing.T) {
 	}
 }
 
-func TestCalculateMaxBackoffStep(t *testing.T) {
-	tests := []struct {
-		base time.Duration
-		min  int
-	}{
-		{0, 1},                       // any positive step is OK
-		{1 * time.Nanosecond, 60},    // ~62
-		{100 * time.Millisecond, 30}, // baseline check
-		{1 * time.Second, 25},
-	}
-	for _, tt := range tests {
-		got := calculateMaxBackoffStep(tt.base)
-		if got < tt.min {
-			t.Errorf("base %v: got %d, want >= %d", tt.base, got, tt.min)
-		}
-	}
-}
-
 func equalIntSlice(a, b []int) bool {
 	if len(a) != len(b) {
 		return false

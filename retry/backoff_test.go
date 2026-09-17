@@ -103,8 +103,16 @@ func TestFullJitterBackoff_Ceiling(t *testing.T) {
 			wantBound: 400 * time.Millisecond,
 		},
 		{
-			name:      "overflow saturates at MaxInt64",
+			name:      "shift overflow saturates at MaxInt64",
 			attempt:   1,
+			cfg:       DelayConfig{BaseDelay: 1 << 62},
+			wantBound: time.Duration(math.MaxInt64),
+		},
+		{
+			// 1<<62 << 2 wraps past MaxInt64 to exactly 0, which is not
+			// negative and so used to slip past the overflow check.
+			name:      "wrapped shift saturates at MaxInt64",
+			attempt:   2,
 			cfg:       DelayConfig{BaseDelay: 1 << 62},
 			wantBound: time.Duration(math.MaxInt64),
 		},
@@ -125,11 +133,8 @@ func TestFullJitterBackoff_Ceiling(t *testing.T) {
 	}
 }
 
-// TestFullJitterBackoff_ZeroCeiling covers every exit that returns 0 without
-// consulting the random source. The wrapped-shift case matters most: it is the
-// only reachable path into the "ceiling <= 0" guard, which exists solely to keep
-// rand.Int64N from panicking on a zero argument, and a coverage report cannot
-// justify it because deleting the guard leaves the rest of the suite green.
+// TestFullJitterBackoff_ZeroCeiling covers the inputs that produce no jitter at
+// all, before the random source is consulted.
 func TestFullJitterBackoff_ZeroCeiling(t *testing.T) {
 	failingJitter(t)
 	tests := []struct {
@@ -141,9 +146,6 @@ func TestFullJitterBackoff_ZeroCeiling(t *testing.T) {
 		{"negative attempt", -1, DelayConfig{BaseDelay: time.Second}},
 		{"zero base delay", 1, DelayConfig{}},
 		{"negative base delay", 1, DelayConfig{BaseDelay: -time.Second}},
-		// 1<<62 << 2 wraps to exactly 0 rather than going negative, so the
-		// overflow guard above does not catch it.
-		{"shift wraps to zero", 2, DelayConfig{BaseDelay: 1 << 62}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -286,13 +288,7 @@ func TestWithFullJitter_AppliesStubbedDelay(t *testing.T) {
 }
 
 func TestOptionNormalization(t *testing.T) {
-	const (
-		base = 100 * time.Millisecond
-		// The largest exponent for which 100ms<<step still fits in a
-		// time.Duration. Hardcoded so that a change to the derivation has to be
-		// acknowledged here instead of being mirrored by the assertion.
-		autoStep = 36
-	)
+	const base = 100 * time.Millisecond
 	tests := []struct {
 		name string
 		opt  Option
@@ -301,17 +297,17 @@ func TestOptionNormalization(t *testing.T) {
 		{
 			name: "negative max delay becomes zero",
 			opt:  WithMaxDelay(-time.Second),
-			want: DelayConfig{BaseDelay: base, MaxJitter: base, MaxBackoffStep: autoStep},
+			want: DelayConfig{BaseDelay: base, MaxJitter: base},
 		},
 		{
 			name: "negative max jitter becomes zero",
 			opt:  WithMaxJitter(-time.Second),
-			want: DelayConfig{BaseDelay: base, MaxBackoffStep: autoStep},
+			want: DelayConfig{BaseDelay: base},
 		},
 		{
-			name: "negative backoff step falls back to the derived step",
+			name: "negative backoff step removes the cap",
 			opt:  WithBackoffStep(-1),
-			want: DelayConfig{BaseDelay: base, MaxJitter: base, MaxBackoffStep: autoStep},
+			want: DelayConfig{BaseDelay: base, MaxJitter: base},
 		},
 	}
 	for _, tt := range tests {
@@ -324,49 +320,68 @@ func TestOptionNormalization(t *testing.T) {
 	}
 }
 
-// TestExponentialBackoff_SaturatesWhenShiftGoesNegative covers only the negative
-// wrap-around. A shift that wraps to a small non-negative value is not saturated
-// at all; see the known gap recorded in PROJECT_RULES.md.
-func TestExponentialBackoff_SaturatesWhenShiftGoesNegative(t *testing.T) {
-	cfg := DelayConfig{BaseDelay: 1 << 62}
-	if got, want := ExponentialBackoff(1, nil, cfg), time.Duration(math.MaxInt64); got != want {
-		t.Errorf("got %v, want MaxInt64", got)
-	}
-}
-
-func TestCalculateMaxBackoffStep_UnrepresentableBase(t *testing.T) {
-	if got := calculateMaxBackoffStep(time.Duration(math.MaxInt64)); got != 0 {
-		t.Errorf("got %d, want 0", got)
-	}
-}
-
-func TestWithBackoffStep_ClampedToBaseDelay(t *testing.T) {
-	// 33 is the derived step for a 1s base delay; hardcoded for the same reason
-	// as autoStep above.
-	r := NewRetrier(WithBaseDelay(time.Second), WithBackoffStep(1000))
-	if got, want := r.inner.strategy.delayConfig.MaxBackoffStep, 33; got != want {
-		t.Errorf("MaxBackoffStep = %d, want %d", got, want)
-	}
-}
-
-func TestCalculateMaxBackoffStep_ExactValues(t *testing.T) {
+func TestExponentialBackoff_SaturatesOnOverflow(t *testing.T) {
+	const max = time.Duration(math.MaxInt64)
 	tests := []struct {
-		base time.Duration
-		want int
+		name    string
+		attempt int
+		base    time.Duration
+		want    time.Duration
 	}{
-		{0, 62},
-		{-time.Second, 62},
-		{time.Nanosecond, 62},
-		{time.Microsecond, 53},
-		{time.Millisecond, 43},
-		{100 * time.Millisecond, 36},
-		{time.Second, 33},
-		{time.Duration(math.MaxInt64), 0},
+		{"shift goes negative", 1, 1 << 62, max},
+		{"shift wraps past MaxInt64 to zero", 2, 1 << 62, max},
+		{"shift wraps to a small positive value", 2, (1 << 62) + 1, max},
+		{"repeated wrap on a later attempt", 3, (1 << 62) + 3, max},
+		{"large attempt on a tiny base", 200, time.Nanosecond, max},
+		{"largest representable result stays exact", 1, 1 << 61, 1 << 62},
+		{"no saturation below the limit", 2, 100 * time.Millisecond, 400 * time.Millisecond},
 	}
 	for _, tt := range tests {
-		if got := calculateMaxBackoffStep(tt.base); got != tt.want {
-			t.Errorf("calculateMaxBackoffStep(%v) = %d, want %d", tt.base, got, tt.want)
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExponentialBackoff(tt.attempt, nil, DelayConfig{BaseDelay: tt.base})
+			if got != tt.want {
+				t.Errorf("ExponentialBackoff(%d, base %v) = %v, want %v", tt.attempt, tt.base, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFullJitterBackoff_SaturatesOnOverflow(t *testing.T) {
+	bounds := stubJitter(t, func(n int64) int64 { return n - 1 })
+
+	if got, want := FullJitterBackoff(2, nil, DelayConfig{BaseDelay: 1 << 62}), time.Duration(math.MaxInt64)-1; got != want {
+		t.Errorf("got %v, want one below MaxInt64", got)
+	}
+	if want := []int64{int64(math.MaxInt64)}; !slices.Equal(*bounds, want) {
+		t.Errorf("bounds = %v, want %v", *bounds, want)
+	}
+}
+
+// TestWithBackoffStep_ZeroMeansUncapped pins the single meaning of
+// MaxBackoffStep == 0, which the retrier no longer rewrites with a derived cap.
+func TestWithBackoffStep_ZeroMeansUncapped(t *testing.T) {
+	for _, step := range []int{0, -1} {
+		r := NewRetrier(WithBaseDelay(time.Nanosecond), WithBackoffStep(step))
+		if got := r.inner.strategy.delayConfig.MaxBackoffStep; got != 0 {
+			t.Errorf("WithBackoffStep(%d): MaxBackoffStep = %d, want 0", step, got)
 		}
+	}
+
+	// 1ns << attempt wrapped to 0 from attempt 64 on before the arithmetic
+	// saturated; assert the tail of a long run saturates instead of collapsing.
+	var delays []time.Duration
+	r := NewRetrier(
+		WithMaxAttempts(102),
+		WithBaseDelay(time.Nanosecond),
+		WithMaxJitter(0),
+		WithExponentialBackoff(),
+		WithSleep(captureSleep(&delays)),
+	)
+	if err := r.Do(func() error { return errTemporary }); err == nil {
+		t.Fatal("expected error")
+	}
+	if last := delays[len(delays)-1]; last != time.Duration(math.MaxInt64) {
+		t.Errorf("final delay = %v, want MaxInt64", last)
 	}
 }
 
@@ -412,5 +427,29 @@ func TestCombineDelays_SaturatesOnOverflow(t *testing.T) {
 	}
 	if got := CombineDelays(one, huge)(1, nil, DelayConfig{}); got != saturated {
 		t.Errorf("huge last: got %v, want MaxInt64", got)
+	}
+}
+
+// TestCombineDelays_NegativeComponents guards the earlier check, which compared
+// the running total against MaxInt64 - d: for a negative component that
+// subtraction wraps and the check reports a spurious MaxInt64, turning a delay
+// offset into a 292-year sleep.
+func TestCombineDelays_NegativeComponents(t *testing.T) {
+	negative := func(int, error, DelayConfig) time.Duration { return -time.Second }
+	positive := func(int, error, DelayConfig) time.Duration { return 3 * time.Second }
+
+	if got := CombineDelays(negative)(1, nil, DelayConfig{}); got != -time.Second {
+		t.Errorf("single negative: got %v, want -1s", got)
+	}
+	if got := CombineDelays(positive, negative)(1, nil, DelayConfig{}); got != 2*time.Second {
+		t.Errorf("3s then -1s: got %v, want 2s", got)
+	}
+	if got := CombineDelays(negative, positive)(1, nil, DelayConfig{}); got != 2*time.Second {
+		t.Errorf("-1s then 3s: got %v, want 2s", got)
+	}
+
+	floor := func(int, error, DelayConfig) time.Duration { return time.Duration(math.MinInt64) }
+	if got, want := CombineDelays(floor, negative)(1, nil, DelayConfig{}), time.Duration(math.MinInt64); got != want {
+		t.Errorf("negative overflow: got %v, want MinInt64", got)
 	}
 }

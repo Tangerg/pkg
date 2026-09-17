@@ -1,0 +1,21 @@
+# Compiled binaries and build output
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Test and coverage artifacts
+*.prof
+coverage.out
+coverage.html
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files

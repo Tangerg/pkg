@@ -125,6 +125,11 @@ func TestFullJitterBackoff_Ceiling(t *testing.T) {
 	}
 }
 
+// TestFullJitterBackoff_ZeroCeiling covers every exit that returns 0 without
+// consulting the random source. The wrapped-shift case matters most: it is the
+// only reachable path into the "ceiling <= 0" guard, which exists solely to keep
+// rand.Int64N from panicking on a zero argument, and a coverage report cannot
+// justify it because deleting the guard leaves the rest of the suite green.
 func TestFullJitterBackoff_ZeroCeiling(t *testing.T) {
 	failingJitter(t)
 	tests := []struct {
@@ -136,6 +141,9 @@ func TestFullJitterBackoff_ZeroCeiling(t *testing.T) {
 		{"negative attempt", -1, DelayConfig{BaseDelay: time.Second}},
 		{"zero base delay", 1, DelayConfig{}},
 		{"negative base delay", 1, DelayConfig{BaseDelay: -time.Second}},
+		// 1<<62 << 2 wraps to exactly 0 rather than going negative, so the
+		// overflow guard above does not catch it.
+		{"shift wraps to zero", 2, DelayConfig{BaseDelay: 1 << 62}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -278,8 +286,13 @@ func TestWithFullJitter_AppliesStubbedDelay(t *testing.T) {
 }
 
 func TestOptionNormalization(t *testing.T) {
-	const base = 100 * time.Millisecond
-	autoStep := calculateMaxBackoffStep(base)
+	const (
+		base = 100 * time.Millisecond
+		// The largest exponent for which 100ms<<step still fits in a
+		// time.Duration. Hardcoded so that a change to the derivation has to be
+		// acknowledged here instead of being mirrored by the assertion.
+		autoStep = 36
+	)
 	tests := []struct {
 		name string
 		opt  Option
@@ -311,7 +324,10 @@ func TestOptionNormalization(t *testing.T) {
 	}
 }
 
-func TestExponentialBackoff_SaturatesOnOverflow(t *testing.T) {
+// TestExponentialBackoff_SaturatesWhenShiftGoesNegative covers only the negative
+// wrap-around. A shift that wraps to a small non-negative value is not saturated
+// at all; see the known gap recorded in PROJECT_RULES.md.
+func TestExponentialBackoff_SaturatesWhenShiftGoesNegative(t *testing.T) {
 	cfg := DelayConfig{BaseDelay: 1 << 62}
 	if got, want := ExponentialBackoff(1, nil, cfg), time.Duration(math.MaxInt64); got != want {
 		t.Errorf("got %v, want MaxInt64", got)
@@ -325,10 +341,32 @@ func TestCalculateMaxBackoffStep_UnrepresentableBase(t *testing.T) {
 }
 
 func TestWithBackoffStep_ClampedToBaseDelay(t *testing.T) {
-	const base = time.Second
-	r := NewRetrier(WithBaseDelay(base), WithBackoffStep(1000))
-	if got, want := r.inner.strategy.delayConfig.MaxBackoffStep, calculateMaxBackoffStep(base); got != want {
+	// 33 is the derived step for a 1s base delay; hardcoded for the same reason
+	// as autoStep above.
+	r := NewRetrier(WithBaseDelay(time.Second), WithBackoffStep(1000))
+	if got, want := r.inner.strategy.delayConfig.MaxBackoffStep, 33; got != want {
 		t.Errorf("MaxBackoffStep = %d, want %d", got, want)
+	}
+}
+
+func TestCalculateMaxBackoffStep_ExactValues(t *testing.T) {
+	tests := []struct {
+		base time.Duration
+		want int
+	}{
+		{0, 62},
+		{-time.Second, 62},
+		{time.Nanosecond, 62},
+		{time.Microsecond, 53},
+		{time.Millisecond, 43},
+		{100 * time.Millisecond, 36},
+		{time.Second, 33},
+		{time.Duration(math.MaxInt64), 0},
+	}
+	for _, tt := range tests {
+		if got := calculateMaxBackoffStep(tt.base); got != tt.want {
+			t.Errorf("calculateMaxBackoffStep(%v) = %d, want %d", tt.base, got, tt.want)
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
 package mime
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/Tangerg/pkg/maps"
@@ -110,6 +111,16 @@ func TestMIME_TypeAndSubType(t *testing.T) {
 	}
 }
 
+// withCharset returns a MIME literal carrying a charset parameter, for table
+// tests that need the charset to be part of the parameter map.
+func withCharset(mimeType, subType, charset string) *MIME {
+	return &MIME{
+		_type:   mimeType,
+		subType: subType,
+		params:  maps.HashMap[string, string]{paramCharset: charset},
+	}
+}
+
 // TestMIME_FullType tests that FullType is an alias for TypeAndSubType
 func TestMIME_FullType(t *testing.T) {
 	mime := &MIME{_type: "text", subType: "html"}
@@ -127,7 +138,7 @@ func TestMIME_Charset(t *testing.T) {
 	}{
 		{
 			name:     "with charset",
-			mime:     &MIME{_type: "text", subType: "html", charset: "UTF-8"},
+			mime:     withCharset("text", "html", "UTF-8"),
 			expected: "UTF-8",
 		},
 		{
@@ -137,8 +148,13 @@ func TestMIME_Charset(t *testing.T) {
 		},
 		{
 			name:     "with ISO charset",
-			mime:     &MIME{_type: "text", subType: "plain", charset: "ISO-8859-1"},
+			mime:     withCharset("text", "plain", "ISO-8859-1"),
 			expected: "ISO-8859-1",
+		},
+		{
+			name:     "quoted charset is decoded",
+			mime:     &MIME{_type: "text", subType: "plain", params: maps.HashMap[string, string]{paramCharset: `"utf 8"`}},
+			expected: "utf 8",
 		},
 	}
 
@@ -281,27 +297,26 @@ func TestMIME_String(t *testing.T) {
 	}
 }
 
-// TestMIME_String_Caching tests that string caching works properly
-func TestMIME_String_Caching(t *testing.T) {
-	params := maps.HashMap[string, string]{}
-	params.Put("charset", "UTF-8")
-
+// TestMIME_String_StableAndReadOnly tests that String() is stable and does not
+// mutate the receiver, so concurrent callers cannot race.
+func TestMIME_String_StableAndReadOnly(t *testing.T) {
 	mime := &MIME{
 		_type:   "text",
 		subType: "html",
-		params:  params,
+		params:  maps.HashMap[string, string]{paramCharset: "UTF-8"},
 	}
 
-	// First call should build and cache
 	first := mime.String()
-	if mime.cachedString == "" {
-		t.Error("cachedString should be set after first String() call")
+	if first != "text/html;charset=UTF-8" {
+		t.Errorf("String() = %q, want %q", first, "text/html;charset=UTF-8")
 	}
 
-	// Second call should return cached value
 	second := mime.String()
 	if first != second {
 		t.Errorf("String() caching failed: first=%v, second=%v", first, second)
+	}
+	if mime.cachedString != "" {
+		t.Error("String() must not write to the receiver")
 	}
 }
 
@@ -519,6 +534,51 @@ func TestMIME_Includes(t *testing.T) {
 			expected: false,
 		},
 		{
+			name:     "parameter-less pattern includes a narrower value",
+			mime:     &MIME{_type: "text", subType: "html"},
+			other:    withCharset("text", "html", "UTF-8"),
+			expected: true,
+		},
+		{
+			name:     "pattern parameter must be satisfied",
+			mime:     withCharset("text", "html", "UTF-8"),
+			other:    &MIME{_type: "text", subType: "html"},
+			expected: false,
+		},
+		{
+			name: "pattern parameters are a subset",
+			mime: withCharset("text", "html", "UTF-8"),
+			other: &MIME{_type: "text", subType: "html", params: maps.HashMap[string, string]{
+				"charset": "UTF-8",
+				"version": "1",
+			}},
+			expected: true,
+		},
+		{
+			name:     "different parameter value does not match",
+			mime:     withCharset("text", "html", "UTF-8"),
+			other:    withCharset("text", "html", "ISO-8859-1"),
+			expected: false,
+		},
+		{
+			name:     "quoted spelling matches its decoded value",
+			mime:     &MIME{_type: "text", subType: "html", params: maps.HashMap[string, string]{paramCharset: `"UTF-8"`}},
+			other:    withCharset("text", "html", "UTF-8"),
+			expected: true,
+		},
+		{
+			name:     "wildcard subtype with parameters",
+			mime:     &MIME{_type: "text", subType: wildcardType, params: maps.HashMap[string, string]{paramCharset: "UTF-8"}},
+			other:    withCharset("text", "html", "UTF-8"),
+			expected: true,
+		},
+		{
+			name:     "wildcard subtype with parameters does not match without them",
+			mime:     &MIME{_type: "text", subType: wildcardType, params: maps.HashMap[string, string]{paramCharset: "UTF-8"}},
+			other:    &MIME{_type: "text", subType: "html"},
+			expected: false,
+		},
+		{
 			name:     "nil other returns false",
 			mime:     &MIME{_type: "text", subType: "html"},
 			other:    nil,
@@ -565,6 +625,18 @@ func TestMIME_IsCompatibleWith(t *testing.T) {
 			name:     "different concrete types not compatible",
 			mime:     &MIME{_type: "text", subType: "html"},
 			other:    &MIME{_type: "application", subType: "json"},
+			expected: false,
+		},
+		{
+			name:     "parameter-less value compatible with a narrower one",
+			mime:     &MIME{_type: "text", subType: "html"},
+			other:    withCharset("text", "html", "UTF-8"),
+			expected: true,
+		},
+		{
+			name:     "conflicting parameter values not compatible",
+			mime:     withCharset("text", "html", "UTF-8"),
+			other:    withCharset("text", "html", "ISO-8859-1"),
 			expected: false,
 		},
 		{
@@ -806,14 +878,20 @@ func TestMIME_EqualsCharset(t *testing.T) {
 	}{
 		{
 			name:     "same charset",
-			mime:     &MIME{_type: "text", subType: "html", charset: "UTF-8"},
-			other:    &MIME{_type: "text", subType: "html", charset: "UTF-8"},
+			mime:     withCharset("text", "html", "UTF-8"),
+			other:    withCharset("text", "html", "UTF-8"),
+			expected: true,
+		},
+		{
+			name:     "same charset in different spellings",
+			mime:     withCharset("text", "html", "UTF-8"),
+			other:    &MIME{_type: "text", subType: "html", params: maps.HashMap[string, string]{paramCharset: `"UTF-8"`}},
 			expected: true,
 		},
 		{
 			name:     "different charset",
-			mime:     &MIME{_type: "text", subType: "html", charset: "UTF-8"},
-			other:    &MIME{_type: "text", subType: "html", charset: "ISO-8859-1"},
+			mime:     withCharset("text", "html", "UTF-8"),
+			other:    withCharset("text", "html", "ISO-8859-1"),
 			expected: false,
 		},
 		{
@@ -824,13 +902,13 @@ func TestMIME_EqualsCharset(t *testing.T) {
 		},
 		{
 			name:     "one empty charset",
-			mime:     &MIME{_type: "text", subType: "html", charset: "UTF-8"},
+			mime:     withCharset("text", "html", "UTF-8"),
 			other:    &MIME{_type: "text", subType: "html"},
 			expected: false,
 		},
 		{
 			name:     "nil other returns false",
-			mime:     &MIME{_type: "text", subType: "html", charset: "UTF-8"},
+			mime:     withCharset("text", "html", "UTF-8"),
 			other:    nil,
 			expected: false,
 		},
@@ -854,59 +932,27 @@ func TestMIME_Equals(t *testing.T) {
 		expected bool
 	}{
 		{
-			name: "completely equal",
-			mime: func() *MIME {
-				params := maps.HashMap[string, string]{}
-				params.Put("charset", "UTF-8")
-				return &MIME{_type: "text", subType: "html", charset: "UTF-8", params: params}
-			}(),
-			other: func() *MIME {
-				params := maps.HashMap[string, string]{}
-				params.Put("charset", "UTF-8")
-				return &MIME{_type: "text", subType: "html", charset: "UTF-8", params: params}
-			}(),
+			name:     "completely equal",
+			mime:     withCharset("text", "html", "UTF-8"),
+			other:    withCharset("text", "html", "UTF-8"),
 			expected: true,
 		},
 		{
-			name: "different type",
-			mime: func() *MIME {
-				params := maps.HashMap[string, string]{}
-				params.Put("charset", "UTF-8")
-				return &MIME{_type: "text", subType: "html", charset: "UTF-8", params: params}
-			}(),
-			other: func() *MIME {
-				params := maps.HashMap[string, string]{}
-				params.Put("charset", "UTF-8")
-				return &MIME{_type: "application", subType: "html", charset: "UTF-8", params: params}
-			}(),
+			name:     "different type",
+			mime:     withCharset("text", "html", "UTF-8"),
+			other:    withCharset("application", "html", "UTF-8"),
 			expected: false,
 		},
 		{
-			name: "different charset",
-			mime: func() *MIME {
-				params := maps.HashMap[string, string]{}
-				params.Put("charset", "UTF-8")
-				return &MIME{_type: "text", subType: "html", charset: "UTF-8", params: params}
-			}(),
-			other: func() *MIME {
-				params := maps.HashMap[string, string]{}
-				params.Put("charset", "UTF-8")
-				return &MIME{_type: "text", subType: "html", charset: "ISO-8859-1", params: params}
-			}(),
+			name:     "different charset",
+			mime:     withCharset("text", "html", "UTF-8"),
+			other:    withCharset("text", "html", "ISO-8859-1"),
 			expected: false,
 		},
 		{
-			name: "different params",
-			mime: func() *MIME {
-				params := maps.HashMap[string, string]{}
-				params.Put("charset", "UTF-8")
-				return &MIME{_type: "text", subType: "html", charset: "UTF-8", params: params}
-			}(),
-			other: func() *MIME {
-				params := maps.HashMap[string, string]{}
-				params.Put("version", "1.0")
-				return &MIME{_type: "text", subType: "html", charset: "UTF-8", params: params}
-			}(),
+			name:     "different params",
+			mime:     withCharset("text", "html", "UTF-8"),
+			other:    &MIME{_type: "text", subType: "html", params: maps.HashMap[string, string]{"version": "1.0"}},
 			expected: false,
 		},
 		{
@@ -964,6 +1010,37 @@ func TestMIME_IsPresentIn(t *testing.T) {
 				{_type: "text", subType: "html", params: maps.HashMap[string, string]{}},
 			},
 			expected: true,
+		},
+		{
+			name: "wildcard entry matches",
+			mime: &MIME{_type: "text", subType: "html"},
+			mimeList: []*MIME{
+				{_type: "application", subType: "json"},
+				{_type: "text", subType: wildcardType},
+			},
+			expected: true,
+		},
+		{
+			name: "entry parameters have to be satisfied",
+			mime: withCharset("text", "html", "UTF-8"),
+			mimeList: []*MIME{
+				withCharset("text", "html", "ISO-8859-1"),
+			},
+			expected: false,
+		},
+		{
+			name: "entry parameters are satisfied",
+			mime: withCharset("text", "html", "UTF-8"),
+			mimeList: []*MIME{
+				{_type: "text", subType: wildcardType, params: maps.HashMap[string, string]{paramCharset: "UTF-8"}},
+			},
+			expected: true,
+		},
+		{
+			name:     "nil entry never matches",
+			mime:     &MIME{_type: "text", subType: "html"},
+			mimeList: []*MIME{nil},
+			expected: false,
 		},
 		{
 			name:     "empty list",
@@ -1113,28 +1190,97 @@ func TestMIME_IsLessSpecific(t *testing.T) {
 	}
 }
 
-// TestMIME_Clone tests the Clone() method
+// TestMIME_Clone tests that Clone copies every component and shares no state.
 func TestMIME_Clone(t *testing.T) {
-	params := maps.HashMap[string, string]{}
-	params.Put("charset", "UTF-8")
-	params.Put("version", "1.0")
+	original := withCharset("text", "html", "UTF-8")
+	original = NewBuilder().
+		FromMime(original).
+		WithParam("version", "1.0").
+		MustBuild()
 
-	original := &MIME{
-		_type:   "text",
-		subType: "html",
-		charset: "UTF-8",
-		params:  params,
+	cloned := original.Clone()
+
+	if cloned == original {
+		t.Fatal("Clone must return a new instance")
+	}
+	if !cloned.Equals(original) {
+		t.Errorf("Clone() = %q, want %q", cloned.String(), original.String())
 	}
 
-	// Note: This test assumes NewBuilder() exists and works correctly
-	// If Clone() is not yet implemented or NewBuilder doesn't exist,
-	// this test will fail
+	cloned.params.Put("version", "2.0")
+	if got, _ := original.Param("version"); got != "1.0" {
+		t.Errorf("original param = %q after mutating the clone, want %q", got, "1.0")
+	}
+}
 
-	t.Run("clone creates independent copy", func(t *testing.T) {
-		// This test would need the Builder to be implemented
-		// For now, we can just verify the method exists
-		_ = original.Clone
-	})
+// TestMIME_Clone_PreservesOddComponents tests that Clone copies instead of
+// rebuilding, so components a builder would default or reject survive.
+func TestMIME_Clone_PreservesOddComponents(t *testing.T) {
+	zero := &MIME{}
+	if cloned := zero.Clone(); cloned.String() != "/" {
+		t.Errorf("Clone() of a zero MIME = %q, want %q", cloned.String(), "/")
+	}
+
+	oddBits := &MIME{_type: "text", subType: "a b"}
+	if cloned := oddBits.Clone(); cloned.SubType() != "a b" {
+		t.Errorf("Clone() subtype = %q, want %q", cloned.SubType(), "a b")
+	}
+
+	if nilMime := (*MIME)(nil).Clone(); nilMime != nil {
+		t.Errorf("Clone() of nil = %v, want nil", nilMime)
+	}
+}
+
+// TestMIME_String_NoMutation tests that String() and the accessors neither
+// write to the receiver nor expose its parameter map.
+func TestMIME_String_NoMutation(t *testing.T) {
+	built := NewBuilder().
+		WithType("text").WithSubType("html").
+		WithParam("name", `"file name.txt"`).
+		MustBuild()
+
+	params := built.Params()
+	params["injected"] = "1"
+	params[paramCharset] = "latin-1"
+
+	if _, ok := built.Param("injected"); ok {
+		t.Error("Params() exposed the parameter map of the MIME")
+	}
+	if got := built.Charset(); got != "" {
+		t.Errorf("Charset() = %q after mutating the copy, want %q", got, "")
+	}
+	if got := built.String(); got != `text/html;name="file name.txt"` {
+		t.Errorf("String() = %q, want %q", got, `text/html;name="file name.txt"`)
+	}
+	if got, ok := built.Param("name"); !ok || got != "file name.txt" {
+		t.Errorf("Param(name) = (%q, %v), want (%q, true)", got, ok, "file name.txt")
+	}
+}
+
+// TestMIME_ConcurrentAccess tests that a built MIME is safe for concurrent use.
+func TestMIME_ConcurrentAccess(t *testing.T) {
+	built := NewBuilder().
+		WithType("text").WithSubType("html").
+		WithParam("z", "3").WithParam("a", "1").
+		MustBuild()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				if got := built.String(); got != "text/html;a=1;z=3" {
+					t.Errorf("String() = %q, want %q", got, "text/html;a=1;z=3")
+				}
+				_ = built.Params()
+				_, _ = built.Param("a")
+				_ = built.Charset()
+				_ = built.Clone()
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // TestMIME_MarshalJSON tests JSON marshaling
@@ -1175,29 +1321,50 @@ func TestMIME_MarshalJSON(t *testing.T) {
 
 // TestMIME_UnmarshalJSON tests JSON unmarshaling
 func TestMIME_UnmarshalJSON(t *testing.T) {
-	// Note: This test assumes Parse() function exists
-	// If Parse() is not implemented, these tests will fail
+	t.Run("round trip", func(t *testing.T) {
+		source := NewBuilder().
+			WithType("text").WithSubType("html").
+			WithParam("name", `"file name.txt"`).
+			MustBuild()
 
-	t.Run("unmarshal requires Parse function", func(t *testing.T) {
-		mime := &MIME{}
-		// This would test unmarshaling if Parse exists
-		_ = mime.UnmarshalJSON([]byte("text/html"))
+		encoded, err := source.MarshalJSON()
+		if err != nil {
+			t.Fatalf("MarshalJSON failed: %v", err)
+		}
+
+		var decoded MIME
+		if err := decoded.UnmarshalJSON(encoded); err != nil {
+			t.Fatalf("UnmarshalJSON failed: %v", err)
+		}
+		if !decoded.Equals(source) {
+			t.Errorf("decoded = %q, want %q", decoded.String(), source.String())
+		}
+	})
+
+	t.Run("nil receiver", func(t *testing.T) {
+		var target *MIME
+		if err := target.UnmarshalJSON([]byte(`"text/html"`)); err == nil {
+			t.Error("UnmarshalJSON on a nil receiver = nil, want error")
+		}
+	})
+
+	t.Run("invalid input", func(t *testing.T) {
+		var target MIME
+		if err := target.UnmarshalJSON([]byte(`"not a mime type"`)); err == nil {
+			t.Error("UnmarshalJSON with an invalid MIME type = nil, want error")
+		}
 	})
 }
 
 // Benchmark tests for performance-critical methods
 
-// BenchmarkMIME_String benchmarks the String() method with caching
+// BenchmarkMIME_String benchmarks the cached read path of String()
 func BenchmarkMIME_String(b *testing.B) {
-	params := maps.HashMap[string, string]{}
-	params.Put("charset", "UTF-8")
-	params.Put("version", "1.0")
-
-	mime := &MIME{
-		_type:   "application",
-		subType: "json",
-		params:  params,
-	}
+	mime := NewBuilder().
+		WithType("application").WithSubType("json").
+		WithParam("charset", "UTF-8").
+		WithParam("version", "1.0").
+		MustBuild()
 
 	b.ResetTimer()
 	for b.Loop() {
@@ -1224,8 +1391,8 @@ func BenchmarkMIME_Equals(b *testing.B) {
 	params2 := maps.HashMap[string, string]{}
 	params2.Put("charset", "UTF-8")
 
-	mime1 := &MIME{_type: "text", subType: "html", charset: "UTF-8", params: params1}
-	mime2 := &MIME{_type: "text", subType: "html", charset: "UTF-8", params: params2}
+	mime1 := &MIME{_type: "text", subType: "html", params: params1}
+	mime2 := &MIME{_type: "text", subType: "html", params: params2}
 
 	b.ResetTimer()
 	for b.Loop() {

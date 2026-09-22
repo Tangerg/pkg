@@ -203,6 +203,31 @@ func TestParse(t *testing.T) {
 			shouldError: true,
 		},
 		{
+			name:        "empty type is rejected",
+			mimeString:  "/0",
+			shouldError: true,
+		},
+		{
+			name:        "quoted empty type is rejected",
+			mimeString:  `""/0`,
+			shouldError: true,
+		},
+		{
+			name:        "quoted empty subtype is rejected",
+			mimeString:  `text/""`,
+			shouldError: true,
+		},
+		{
+			name:        "wildcard subtype without a type is rejected",
+			mimeString:  "/*",
+			shouldError: true,
+		},
+		{
+			name:        "only a slash is rejected",
+			mimeString:  "/",
+			shouldError: true,
+		},
+		{
 			name:         "quoted parameter value",
 			mimeString:   "text/html; charset=\"UTF-8\"",
 			shouldError:  false,
@@ -218,11 +243,39 @@ func TestParse(t *testing.T) {
 			expectedSub:  "vnd.api+json",
 		},
 		{
-			name:         "parameter without value",
-			mimeString:   "text/html; charset",
+			name:        "parameter without '=' is rejected",
+			mimeString:  "text/html; charset",
+			shouldError: true,
+		},
+		{
+			name:        "parameter without a name is rejected",
+			mimeString:  "text/html; =UTF-8",
+			shouldError: true,
+		},
+		{
+			name:        "repeated parameter is rejected",
+			mimeString:  "text/html; charset=UTF-8; charset=ISO-8859-1",
+			shouldError: true,
+		},
+		{
+			name:        "repeated parameter in another case is rejected",
+			mimeString:  "text/html; charset=UTF-8; CHARSET=ISO-8859-1",
+			shouldError: true,
+		},
+		{
+			name:         "empty charset value is dropped",
+			mimeString:   "text/html; charset=",
 			shouldError:  false,
 			expectedType: "text",
 			expectedSub:  "html",
+		},
+		{
+			name:         "empty segments are tolerated",
+			mimeString:   "text/html;;charset=UTF-8;",
+			shouldError:  false,
+			expectedType: "text",
+			expectedSub:  "html",
+			hasParams:    true,
 		},
 	}
 
@@ -246,6 +299,9 @@ func TestParse(t *testing.T) {
 				}
 				if result.SubType() != tt.expectedSub {
 					t.Errorf("SubType() = %q, want %q", result.SubType(), tt.expectedSub)
+				}
+				if tt.hasParams != (result.params.Size() > 0) {
+					t.Errorf("params = %v, want hasParams = %v", result.Params(), tt.hasParams)
 				}
 			}
 		})
@@ -709,4 +765,145 @@ func BenchmarkIsChecks(b *testing.B) {
 			_ = IsVideo(mime)
 		}
 	})
+}
+
+// TestParse_EmptyAndToleratedSegments tests the parameters Parse accepts with
+// an empty value and the segments it ignores.
+func TestParse_EmptyAndToleratedSegments(t *testing.T) {
+	tests := []struct {
+		name       string
+		mimeString string
+		wantString string
+	}{
+		{
+			name:       "trailing semicolon",
+			mimeString: "text/html;",
+			wantString: "text/html",
+		},
+		{
+			name:       "empty segments",
+			mimeString: "text/html;;charset=UTF-8;",
+			wantString: "text/html;charset=UTF-8",
+		},
+		{
+			name:       "empty value round trips",
+			mimeString: "text/html; version=",
+			wantString: "text/html;version=",
+		},
+		{
+			name:       "whitespace around the separator",
+			mimeString: "text/html ;  charset = UTF-8 ",
+			wantString: "text/html;charset=UTF-8",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.mimeString)
+			if err != nil {
+				t.Fatalf("Parse(%q) failed: %v", tt.mimeString, err)
+			}
+
+			if got := parsed.String(); got != tt.wantString {
+				t.Errorf("String() = %q, want %q", got, tt.wantString)
+			}
+
+			reparsed, err := Parse(parsed.String())
+			if err != nil {
+				t.Fatalf("Parse(%q) failed: %v", parsed.String(), err)
+			}
+			if !reparsed.Equals(parsed) {
+				t.Errorf("round trip = %q, want %q", reparsed.String(), parsed.String())
+			}
+		})
+	}
+}
+
+// TestParse_QuotedParameters tests that quoting is decoded on the way in and
+// re-applied only where a token cannot express the value.
+func TestParse_QuotedParameters(t *testing.T) {
+	tests := []struct {
+		name       string
+		mimeString string
+		paramKey   string
+		paramValue string
+		wantString string
+		wantError  bool
+	}{
+		{
+			name:       "quoted charset with space",
+			mimeString: `text/html; charset="utf 8"`,
+			paramKey:   paramCharset,
+			paramValue: "UTF 8",
+			wantString: `text/html;charset="UTF 8"`,
+		},
+		{
+			name:       "quoted token loses its quoting",
+			mimeString: `text/html; charset="UTF-8"`,
+			paramKey:   paramCharset,
+			paramValue: "UTF-8",
+			wantString: "text/html;charset=UTF-8",
+		},
+		{
+			name:       "escaped quote does not end the value",
+			mimeString: `text/plain; name="a\";b"`,
+			paramKey:   "name",
+			paramValue: `a";b`,
+			wantString: `text/plain;name="a\";b"`,
+		},
+		{
+			name:       "single quotes are token characters",
+			mimeString: `text/plain; name=''''`,
+			paramKey:   "name",
+			paramValue: `''''`,
+			wantString: `text/plain;name=''''`,
+		},
+		{
+			name:       "single-quoted value with space is rejected",
+			mimeString: `text/plain; name='a b'`,
+			wantError:  true,
+		},
+		{
+			name:       "semicolon inside quotes",
+			mimeString: `text/plain; boundary="a;b"`,
+			paramKey:   "boundary",
+			paramValue: "a;b",
+			wantString: `text/plain;boundary="a;b"`,
+		},
+		{
+			name:       "unquoted value with space is rejected",
+			mimeString: `text/plain; name=a b`,
+			wantError:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.mimeString)
+			if tt.wantError {
+				if err == nil {
+					t.Fatalf("Parse(%q) = nil, want error", tt.mimeString)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Parse(%q) failed: %v", tt.mimeString, err)
+			}
+
+			if got, ok := parsed.Param(tt.paramKey); !ok || got != tt.paramValue {
+				t.Errorf("Param(%q) = (%q, %v), want (%q, true)", tt.paramKey, got, ok, tt.paramValue)
+			}
+			if got := parsed.String(); got != tt.wantString {
+				t.Errorf("String() = %q, want %q", got, tt.wantString)
+			}
+
+			reparsed, err := Parse(parsed.String())
+			if err != nil {
+				t.Fatalf("Parse(%q) failed: %v", parsed.String(), err)
+			}
+			if !reparsed.Equals(parsed) {
+				t.Errorf("round trip = %q, want %q", reparsed.String(), parsed.String())
+			}
+		})
+	}
 }

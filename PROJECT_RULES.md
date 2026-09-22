@@ -49,3 +49,4 @@
 - `gofmt -l .`、`go vet ./...`、`go test -race ./...`(并发包尤其)。
 - `./scripts/check-imports.sh`(依赖闭包护栏:只允许 stdlib 与 go.mod 声明的三方库,且不 import 业务模块)。
 - 改 `xml` / `json` 解析器:跑对应 `-fuzz` 目标各数秒。
+- 改 `mime` 的 `Parse` / 引号 / 参数路径:跑 `go test -run=XXX -fuzz=FuzzParse -fuzztime=15s ./mime/`(`mime/testdata/fuzz` 里的历史 crasher 会随 `go test` 一起回归)。

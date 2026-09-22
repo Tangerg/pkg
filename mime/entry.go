@@ -42,16 +42,17 @@ func MustNew(mimeType string, subType string) *MIME {
 }
 
 // Parse decodes a MIME type string such as "text/html; charset=UTF-8"
-// into a [MIME]. A bare "*" is treated as "*/*". Quoted parameter
-// values are preserved verbatim. Returns [ErrorInvalidMimeType] if
-// the input is malformed.
+// into a [MIME]. A bare "*" is treated as "*/*". Double-quoted parameter values
+// (RFC 2045) are decoded and re-encoded in canonical spelling; [MIME.Param] and
+// [MIME.String] therefore work with the value rather than the quoting.
+//
+// Malformed parameters are reported instead of dropped: a parameter without
+// "=", a parameter without a name, or a repeated parameter name (compared
+// case-insensitively) returns [ErrorInvalidMimeType]. An empty value and empty
+// segments, such as a trailing ";", are accepted.
 func Parse(mimeString string) (*MIME, error) {
-	semicolonIndex := strings.Index(mimeString, ";")
-	typeSubtypeString := mimeString
-	if semicolonIndex >= 0 {
-		typeSubtypeString = mimeString[:semicolonIndex]
-	}
-	typeSubtypeString = strings.TrimSpace(typeSubtypeString)
+	segments := paramSegments(mimeString)
+	typeSubtypeString := strings.TrimSpace(segments[0])
 
 	if typeSubtypeString == "" {
 		return nil, fmt.Errorf("%w: 'mime type' must not be empty", ErrorInvalidMimeType)
@@ -70,40 +71,43 @@ func Parse(mimeString string) (*MIME, error) {
 		return nil, fmt.Errorf("%w: does not contain subtype after '/'", ErrorInvalidMimeType)
 	}
 
-	primaryType := typeSubtypeString[:slashIndex]
-	subType := typeSubtypeString[slashIndex+1:]
+	primaryType := normalizeTypeComponent(typeSubtypeString[:slashIndex])
+	subType := normalizeTypeComponent(typeSubtypeString[slashIndex+1:])
+
+	// Quoting is stripped by the builder, so an empty component has to be
+	// rejected here rather than silently become the wildcard default.
+	if primaryType == "" {
+		return nil, fmt.Errorf("%w: does not contain type before '/'", ErrorInvalidMimeType)
+	}
+	if subType == "" {
+		return nil, fmt.Errorf("%w: does not contain subtype after '/'", ErrorInvalidMimeType)
+	}
 
 	if primaryType == wildcardType && subType != wildcardType {
 		return nil, fmt.Errorf("%w: wildcard type is legal only in '*/*' (all mime types)", ErrorInvalidMimeType)
 	}
 
 	parameterMap := maps.NewHashMap[string, string]()
-	for semicolonIndex < len(mimeString) {
-		nextSemicolonIndex := semicolonIndex + 1
-		isQuoted := false
-
-		for nextSemicolonIndex < len(mimeString) {
-			currentChar := mimeString[nextSemicolonIndex]
-			if currentChar == ';' {
-				if !isQuoted {
-					break
-				}
-			} else if currentChar == '"' {
-				isQuoted = !isQuoted
-			}
-			nextSemicolonIndex++
+	for _, segment := range segments[1:] {
+		parameterString := strings.TrimSpace(segment)
+		if parameterString == "" {
+			continue
 		}
 
-		parameterString := strings.TrimSpace(mimeString[semicolonIndex+1 : nextSemicolonIndex])
-		if len(parameterString) > 0 {
-			equalsIndex := strings.Index(parameterString, "=")
-			if equalsIndex > 0 {
-				paramKey := strings.TrimSpace(parameterString[:equalsIndex])
-				paramValue := strings.TrimSpace(parameterString[equalsIndex+1:])
-				parameterMap.Put(paramKey, paramValue)
-			}
+		rawKey, rawValue, hasValue := strings.Cut(parameterString, "=")
+		if !hasValue {
+			return nil, fmt.Errorf("%w: parameter %q has no '='", ErrorInvalidMimeType, parameterString)
 		}
-		semicolonIndex = nextSemicolonIndex
+
+		paramKey := normalizeParamKey(strings.TrimSpace(rawKey))
+		if paramKey == "" {
+			return nil, fmt.Errorf("%w: parameter %q has no name", ErrorInvalidMimeType, parameterString)
+		}
+		if parameterMap.ContainsKey(paramKey) {
+			return nil, fmt.Errorf("%w: duplicate parameter %q", ErrorInvalidMimeType, paramKey)
+		}
+
+		parameterMap.Put(paramKey, strings.TrimSpace(rawValue))
 	}
 
 	mimeResult, err := NewBuilder().
@@ -116,6 +120,30 @@ func Parse(mimeString string) (*MIME, error) {
 	}
 
 	return mimeResult, nil
+}
+
+// paramSegments splits a MIME string on the ';' separators outside quoted
+// strings, whose first segment is the type/subtype part. A backslash inside a
+// quoted string escapes the next character, so an escaped quote does not end
+// the value.
+func paramSegments(mimeString string) []string {
+	segments := make([]string, 0, 3)
+	segmentStart := 0
+	isQuoted := false
+
+	for i := 0; i < len(mimeString); i++ {
+		switch {
+		case isQuoted && mimeString[i] == '\\' && i+1 < len(mimeString):
+			i++
+		case mimeString[i] == '"':
+			isQuoted = !isQuoted
+		case mimeString[i] == ';' && !isQuoted:
+			segments = append(segments, mimeString[segmentStart:i])
+			segmentStart = i + 1
+		}
+	}
+
+	return append(segments, mimeString[segmentStart:])
 }
 
 // Detect returns the MIME type inferred from the magic bytes of

@@ -200,8 +200,10 @@ func TestNormalizeXSubtype_PredefinedMappings(t *testing.T) {
 	}
 }
 
-// TestNormalizeXSubtype_FallbackBehavior tests fallback behavior (remove x- prefix when no mapping exists)
-func TestNormalizeXSubtype_FallbackBehavior(t *testing.T) {
+// TestNormalizeXSubtype_Unmapped tests that "x-" subtypes without a registered
+// mapping are returned unchanged: dropping the prefix would fabricate a type
+// that does not exist.
+func TestNormalizeXSubtype_Unmapped(t *testing.T) {
 	tests := []struct {
 		name            string
 		input           string
@@ -210,32 +212,50 @@ func TestNormalizeXSubtype_FallbackBehavior(t *testing.T) {
 		{
 			name:            "unknown x- type",
 			input:           "application/x-unknown",
-			expectedSubtype: "unknown",
+			expectedSubtype: "x-unknown",
 		},
 		{
 			name:            "custom x- type",
 			input:           "text/x-custom-type",
-			expectedSubtype: "custom-type",
+			expectedSubtype: "x-custom-type",
 		},
 		{
-			name:            "x- type with hyphens",
-			input:           "application/x-my-special-format",
-			expectedSubtype: "my-special-format",
+			name:            "vendor prefix",
+			input:           "application/x-vnd.custom",
+			expectedSubtype: "x-vnd.custom",
+		},
+		{
+			name:            "plus suffix",
+			input:           "application/x-custom+xml",
+			expectedSubtype: "x-custom+xml",
+		},
+		{
+			name:            "only x- prefix",
+			input:           "application/x-",
+			expectedSubtype: "x-",
+		},
+		{
+			name:            "repeated x- prefix",
+			input:           "application/x-x-type",
+			expectedSubtype: "x-x-type",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mime, err := Parse(tt.input)
+			parsed, err := Parse(tt.input)
 			if err != nil {
-				t.Fatalf("Failed to parse MIME: %v", err)
+				t.Fatalf("Parse failed: %v", err)
 			}
 
-			normalized := NormalizeXSubtype(mime)
+			normalized := NormalizeXSubtype(parsed)
 
 			if normalized.SubType() != tt.expectedSubtype {
 				t.Errorf("subtype = %v, want %v",
 					normalized.SubType(), tt.expectedSubtype)
+			}
+			if normalized.String() != parsed.String() {
+				t.Errorf("String() = %v, want %v", normalized.String(), parsed.String())
 			}
 		})
 	}
@@ -381,12 +401,12 @@ func TestNormalizeXSubtype_EdgeCases(t *testing.T) {
 		{
 			name:            "only x- prefix",
 			input:           "application/x-",
-			expectedSubtype: "*",
+			expectedSubtype: "x-",
 		},
 		{
 			name:            "multiple x- prefixes",
 			input:           "application/x-x-type",
-			expectedSubtype: "x-type",
+			expectedSubtype: "x-x-type",
 		},
 		{
 			name:            "x in the middle",
@@ -423,17 +443,17 @@ func TestNormalizeXSubtype_ComplexSubtypes(t *testing.T) {
 		{
 			name:            "with vendor prefix",
 			input:           "application/x-vnd.custom",
-			expectedSubtype: "vnd.custom",
+			expectedSubtype: "x-vnd.custom",
 		},
 		{
 			name:            "with plus suffix",
 			input:           "application/x-custom+xml",
-			expectedSubtype: "custom+xml",
+			expectedSubtype: "x-custom+xml",
 		},
 		{
 			name:            "multiple dot separators",
 			input:           "application/x-vnd.company.product",
-			expectedSubtype: "vnd.company.product",
+			expectedSubtype: "x-vnd.company.product",
 		},
 	}
 
@@ -638,5 +658,43 @@ func BenchmarkRegisterXSubtype(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		RegisterXSubtype("x-test", "test")
+	}
+}
+
+// TestNormalizeXSubtype_NilSource tests the nil receiver path.
+func TestNormalizeXSubtype_NilSource(t *testing.T) {
+	if normalized := NormalizeXSubtype(nil); normalized != nil {
+		t.Errorf("NormalizeXSubtype(nil) = %v, want nil", normalized)
+	}
+}
+
+// TestNormalizeXSubtype_WarmStringCache guards the regression where a mapped
+// subtype kept returning the source's canonical string.
+func TestNormalizeXSubtype_WarmStringCache(t *testing.T) {
+	source := MustNew("application", "x-gzip")
+	_ = source.String() // the built MIME already carries a canonical string
+
+	normalized := NormalizeXSubtype(source)
+
+	if normalized.String() != "application/gzip" {
+		t.Errorf("String() = %q, want %q", normalized.String(), "application/gzip")
+	}
+	if source.String() != "application/x-gzip" {
+		t.Errorf("source String() = %q, want %q", source.String(), "application/x-gzip")
+	}
+}
+
+// TestRegisterXSubtype_NormalizesKey tests that registrations are reachable
+// regardless of the case they were registered with.
+func TestRegisterXSubtype_NormalizesKey(t *testing.T) {
+	RegisterXSubtype("X-Mixed-Case", "VND.Mixed")
+
+	parsed, err := Parse("application/x-mixed-case")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if got := NormalizeXSubtype(parsed).SubType(); got != "vnd.mixed" {
+		t.Errorf("normalized subtype = %q, want %q", got, "vnd.mixed")
 	}
 }

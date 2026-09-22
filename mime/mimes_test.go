@@ -815,3 +815,73 @@ func BenchmarkMixedOperations(b *testing.B) {
 		}
 	})
 }
+
+// TestRegisterExtension_NormalizesKey tests that the registered key matches
+// how lookups spell extensions, and that impossible keys are rejected.
+func TestRegisterExtension_NormalizesKey(t *testing.T) {
+	if err := RegisterExtension(".MiXeD-CaSe", "application/x-mixed-case"); err != nil {
+		t.Fatalf("RegisterExtension failed: %v", err)
+	}
+
+	if got := StringTypeByExtension("file.mixed-case"); got != "application/x-mixed-case" {
+		t.Errorf("StringTypeByExtension = %q, want %q", got, "application/x-mixed-case")
+	}
+	if got := StringTypeByExtension("file.MIXED-CASE"); got != "application/x-mixed-case" {
+		t.Errorf("StringTypeByExtension = %q, want %q", got, "application/x-mixed-case")
+	}
+
+	for _, ext := range []string{"nodot", ".", ""} {
+		if err := RegisterExtension(ext, "application/x-unreachable"); err == nil {
+			t.Errorf("RegisterExtension(%q) = nil, want error", ext)
+		}
+		if _, found := TypeByExtension("file" + ext); found {
+			t.Errorf("extension %q should not be registered", ext)
+		}
+	}
+}
+
+// TestRegisterExtensions_RejectsDuplicateSpellings tests that a batch cannot
+// install two spellings of one extension.
+func TestRegisterExtensions_RejectsDuplicateSpellings(t *testing.T) {
+	err := RegisterExtensions(map[string]string{
+		".dup-spelling": "application/x-first",
+		".DUP-SPELLING": "application/x-second",
+	})
+	if err == nil {
+		t.Fatal("RegisterExtensions with duplicate spellings = nil, want error")
+	}
+
+	_, found := TypeByExtension("file.dup-spelling")
+	if found {
+		t.Error("no mapping should be installed when the batch is rejected")
+	}
+}
+
+// TestExtensionLookups_Agree tests that the string and MIME lookups report the
+// same type for one extension, whichever way it was registered.
+func TestExtensionLookups_Agree(t *testing.T) {
+	registered := []string{".agree-canonical", ".agree-odd"}
+	if err := RegisterExtension(registered[0], "application/agree"); err != nil {
+		t.Fatalf("RegisterExtension failed: %v", err)
+	}
+	if err := RegisterExtension(registered[1], "TEXT/HTML; charset=UTF-8"); err != nil {
+		t.Fatalf("RegisterExtension failed: %v", err)
+	}
+
+	for _, ext := range registered {
+		filePath := "file" + ext
+
+		typedMime, found := TypeByExtension(filePath)
+		if !found {
+			t.Fatalf("TypeByExtension(%q) not found", filePath)
+		}
+
+		if got, want := StringTypeByExtension(filePath), typedMime.String(); got != want {
+			t.Errorf("StringTypeByExtension(%q) = %q, TypeByExtension = %q", filePath, got, want)
+		}
+	}
+
+	if got := StringTypeByExtension("file.agree-odd"); got != "text/html;charset=UTF-8" {
+		t.Errorf("StringTypeByExtension = %q, want canonical spelling %q", got, "text/html;charset=UTF-8")
+	}
+}

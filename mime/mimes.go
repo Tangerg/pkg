@@ -8,8 +8,9 @@ import (
 	"sync"
 )
 
-// extMimetypeStringMappings is the built-in extension-to-MIME table
-// loaded into [extToMimeTypeMappings] at init time.
+// extMimetypeStringMappings is the built-in extension-to-MIME seed table. It
+// is read once at init into [extToMimeTypeMappings], the table that lookups
+// and registrations use.
 var extMimetypeStringMappings = map[string]string{
 	// Microsoft Office (OpenXML)
 	".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -692,36 +693,37 @@ func init() {
 	}
 }
 
-// StringTypeByExtension returns the MIME type string for the extension
-// of filePath. It consults the package's built-in table first, then
-// the standard library's mime package, falling back to
-// "application/octet-stream" if nothing matches. Safe for concurrent use.
+// StringTypeByExtension returns the MIME type string for the extension of
+// filePath: the canonical form of the package's table entry, then the standard
+// library's mime package, and "application/octet-stream" if neither matches.
+// Safe for concurrent use.
 func StringTypeByExtension(filePath string) string {
 	fileExtension := strings.ToLower(path.Ext(filePath))
 
-	// First try internal mapping with read lock
 	extMutex.RLock()
-	mimeTypeString := extMimetypeStringMappings[fileExtension]
+	mappedMime, extensionFound := extToMimeTypeMappings[fileExtension]
 	extMutex.RUnlock()
 
-	if mimeTypeString != "" {
+	if extensionFound {
+		return mappedMime.String()
+	}
+
+	mimeTypeString := mime.TypeByExtension(fileExtension)
+	if mimeTypeString == "" {
+		return "application/octet-stream"
+	}
+
+	parsedMime, err := Parse(mimeTypeString)
+	if err != nil {
 		return mimeTypeString
 	}
 
-	// Fall back to the standard library's mime package
-	mimeTypeString = mime.TypeByExtension(fileExtension)
-	if mimeTypeString != "" {
-		return mimeTypeString
-	}
-
-	mimeTypeString = "application/octet-stream"
-
-	return mimeTypeString
+	return parsedMime.String()
 }
 
 // TypeByExtension returns a [MIME] for the extension of filePath and
-// whether it was found in the package's built-in table. The returned
-// value is a clone and may be mutated freely. Safe for concurrent use.
+// whether it was found in the package's table. The returned value is a
+// clone and may be mutated freely. Safe for concurrent use.
 func TypeByExtension(filePath string) (*MIME, bool) {
 	fileExtension := strings.ToLower(path.Ext(filePath))
 
@@ -736,43 +738,70 @@ func TypeByExtension(filePath string) (*MIME, bool) {
 	return nil, false
 }
 
-// RegisterExtension associates ext (with leading dot, e.g. ".json")
-// with mimeType, replacing any prior entry. Returns an error if
-// mimeType fails to parse. Safe for concurrent use.
+// RegisterExtension associates ext (with leading dot, e.g. ".json") with
+// mimeType, replacing any prior entry. Extensions are matched
+// case-insensitively, so ext is lower-cased. Returns an error if ext is not a
+// dotted extension or mimeType fails to parse. Safe for concurrent use.
 func RegisterExtension(ext, mimeType string) error {
+	normalizedExt, err := normalizeExtension(ext)
+	if err != nil {
+		return err
+	}
+
 	parsedMime, err := Parse(mimeType)
 	if err != nil {
 		return fmt.Errorf("invalid MIME type %q: %w", mimeType, err)
 	}
 
 	extMutex.Lock()
-	extMimetypeStringMappings[ext] = mimeType
-	extToMimeTypeMappings[ext] = parsedMime
+	extToMimeTypeMappings[normalizedExt] = parsedMime
 	extMutex.Unlock()
 
 	return nil
 }
 
-// RegisterExtensions is the batch form of [RegisterExtension]. All
-// entries are validated up front; on the first parse failure no
-// mapping is installed (all-or-nothing). Safe for concurrent use.
+// RegisterExtensions is the batch form of [RegisterExtension]. All entries
+// are validated up front; on the first parse failure no mapping is installed
+// (all-or-nothing). Extensions that differ only in case are rejected. Safe
+// for concurrent use.
 func RegisterExtensions(mappings map[string]string) error {
-	// Pre-parse all MIME types before acquiring the lock
 	parsedMimes := make(map[string]*MIME, len(mappings))
+	spelledExts := make(map[string]string, len(mappings))
+
 	for ext, mimeType := range mappings {
+		normalizedExt, err := normalizeExtension(ext)
+		if err != nil {
+			return err
+		}
+		if otherExt, duplicate := spelledExts[normalizedExt]; duplicate {
+			return fmt.Errorf("duplicate extension %q: %q and %q", normalizedExt, otherExt, ext)
+		}
+
 		parsedMime, err := Parse(mimeType)
 		if err != nil {
 			return fmt.Errorf("invalid MIME type %q for extension %q: %w", mimeType, ext, err)
 		}
-		parsedMimes[ext] = parsedMime
+
+		spelledExts[normalizedExt] = ext
+		parsedMimes[normalizedExt] = parsedMime
 	}
 
 	extMutex.Lock()
-	for ext, mimeType := range mappings {
-		extMimetypeStringMappings[ext] = mimeType
-		extToMimeTypeMappings[ext] = parsedMimes[ext]
+	for ext, parsedMime := range parsedMimes {
+		extToMimeTypeMappings[ext] = parsedMime
 	}
 	extMutex.Unlock()
 
 	return nil
+}
+
+// normalizeExtension lower-cases ext and verifies it has the shape [path.Ext]
+// produces: a leading dot followed by at least one character. An extension
+// that fails this check could never be looked up.
+func normalizeExtension(ext string) (string, error) {
+	normalizedExt := strings.ToLower(ext)
+	if len(normalizedExt) < 2 || normalizedExt[0] != '.' {
+		return "", fmt.Errorf("invalid extension %q: want a leading dot followed by at least one character", ext)
+	}
+	return normalizedExt, nil
 }

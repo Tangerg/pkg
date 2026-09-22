@@ -72,8 +72,8 @@ func TestNewBuilder(t *testing.T) {
 	})
 
 	t.Run("default charset is empty", func(t *testing.T) {
-		if builder.mime.charset != "" {
-			t.Errorf("Default charset = %v, want empty string", builder.mime.charset)
+		if _, hasCharset := builder.mime.params.Get(paramCharset); hasCharset {
+			t.Error("Default params should not contain a charset")
 		}
 	})
 
@@ -382,9 +382,8 @@ func TestBuilder_WithCharset(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			builder := NewBuilder().WithCharset(tt.input)
 
-			if builder.mime.charset != tt.expectedCharset {
-				t.Errorf("WithCharset() charset = %v, want %v",
-					builder.mime.charset, tt.expectedCharset)
+			if got := builder.mime.Charset(); got != tt.expectedCharset {
+				t.Errorf("WithCharset() charset = %v, want %v", got, tt.expectedCharset)
 			}
 
 			paramValue, hasParam := builder.mime.params.Get(paramCharset)
@@ -556,7 +555,6 @@ func TestBuilder_FromMime(t *testing.T) {
 		sourceMime := &MIME{
 			_type:        "text",
 			subType:      "html",
-			charset:      "UTF-8",
 			params:       params,
 			cachedString: "text/html;charset=UTF-8;version=1.0",
 		}
@@ -571,17 +569,33 @@ func TestBuilder_FromMime(t *testing.T) {
 			t.Errorf("SubType not copied: got %v, want %v",
 				builder.mime.subType, sourceMime.subType)
 		}
-		if builder.mime.charset != sourceMime.charset {
+		if builder.mime.Charset() != sourceMime.Charset() {
 			t.Errorf("Charset not copied: got %v, want %v",
-				builder.mime.charset, sourceMime.charset)
+				builder.mime.Charset(), sourceMime.Charset())
 		}
-		if builder.mime.cachedString != sourceMime.cachedString {
-			t.Errorf("StringCache not copied: got %v, want %v",
-				builder.mime.cachedString, sourceMime.cachedString)
+		if !builder.mime.EqualsParams(sourceMime) {
+			t.Error("Params not copied")
 		}
-		if len(builder.mime.params) != len(sourceMime.params) {
-			t.Errorf("Params not copied: got %v entries, want %v",
-				len(builder.mime.params), len(sourceMime.params))
+		if builder.mime.cachedString != "" {
+			t.Error("FromMime must not copy the canonical string")
+		}
+	})
+
+	t.Run("changing the copy keeps the source intact", func(t *testing.T) {
+		sourceMime := MustNew("text", "html")
+		_ = sourceMime.String()
+
+		derived := NewBuilder().
+			FromMime(sourceMime).
+			WithSubType("plain").
+			WithCharset("utf-8").
+			MustBuild()
+
+		if derived.String() != "text/plain;charset=UTF-8" {
+			t.Errorf("derived MIME = %q, want %q", derived.String(), "text/plain;charset=UTF-8")
+		}
+		if sourceMime.String() != "text/html" {
+			t.Errorf("source MIME = %q, want %q", sourceMime.String(), "text/html")
 		}
 	})
 
@@ -867,12 +881,151 @@ func BenchmarkBuilder_FromMime(b *testing.B) {
 	sourceMime := &MIME{
 		_type:   "text",
 		subType: "html",
-		charset: "UTF-8",
 		params:  params,
 	}
 
 	b.ResetTimer()
 	for b.Loop() {
 		_ = NewBuilder().FromMime(sourceMime)
+	}
+}
+
+// TestBuilder_Build_IndependentResult guards against a built MIME being
+// mutated by later use of its builder.
+func TestBuilder_Build_IndependentResult(t *testing.T) {
+	builder := NewBuilder().WithType("text").WithSubType("html")
+	built := builder.MustBuild()
+
+	builder.WithSubType("plain").WithCharset("utf-8")
+
+	if built.String() != "text/html" {
+		t.Errorf("built MIME = %q, want %q", built.String(), "text/html")
+	}
+	if built.SubType() != "html" {
+		t.Errorf("built subtype = %q, want %q", built.SubType(), "html")
+	}
+	if _, hasCharset := built.Param(paramCharset); hasCharset {
+		t.Error("built MIME gained the builder's charset")
+	}
+
+	again := builder.MustBuild()
+	if again.String() != "text/plain;charset=UTF-8" {
+		t.Errorf("second build = %q, want %q", again.String(), "text/plain;charset=UTF-8")
+	}
+	if again == built {
+		t.Error("Build must return a new MIME per call")
+	}
+}
+
+// TestBuilder_Build_CanonicalStringIsSorted pins the canonical form to
+// ascending parameter order.
+func TestBuilder_Build_CanonicalStringIsSorted(t *testing.T) {
+	built := NewBuilder().
+		WithType("text").WithSubType("html").
+		WithParams(map[string]string{"z": "3", "a": "1", "m": "2"}).
+		MustBuild()
+
+	if built.String() != "text/html;a=1;m=2;z=3" {
+		t.Errorf("String() = %q, want %q", built.String(), "text/html;a=1;m=2;z=3")
+	}
+
+	for i := 0; i < 8; i++ {
+		if got := built.String(); got != "text/html;a=1;m=2;z=3" {
+			t.Fatalf("String() = %q on call %d, want stable output", got, i)
+		}
+	}
+}
+
+// TestBuilder_WithParams_Deterministic tests that colliding spellings of one
+// parameter name resolve to the same result on every build.
+func TestBuilder_WithParams_Deterministic(t *testing.T) {
+	colliding := map[string]string{
+		"charset": "UTF-8",
+		"Charset": "ISO-8859-1",
+		"version": "1",
+	}
+
+	first := NewBuilder().
+		WithType("text").WithSubType("html").
+		WithParams(colliding).
+		MustBuild()
+
+	for i := 0; i < 16; i++ {
+		built := NewBuilder().
+			WithType("text").WithSubType("html").
+			WithParams(colliding).
+			MustBuild()
+
+		if built.String() != first.String() {
+			t.Fatalf("build %d = %q, want %q", i, built.String(), first.String())
+		}
+	}
+}
+
+// TestBuilder_Params_SpellingAndDecoding covers the canonical spelling of
+// quoted values and the decoding done by the accessors.
+func TestBuilder_Params_SpellingAndDecoding(t *testing.T) {
+	tests := []struct {
+		name         string
+		paramValue   string
+		wantParam    string
+		wantSpelling string
+	}{
+		{
+			name:         "token value stays unquoted",
+			paramValue:   "value",
+			wantParam:    "value",
+			wantSpelling: "value",
+		},
+		{
+			name:         "quoted token loses its quoting",
+			paramValue:   `"value"`,
+			wantParam:    "value",
+			wantSpelling: "value",
+		},
+		{
+			name:         "quoted value keeps quoted spelling",
+			paramValue:   `"file name.txt"`,
+			wantParam:    "file name.txt",
+			wantSpelling: `"file name.txt"`,
+		},
+		{
+			name:         "escaped quote survives both directions",
+			paramValue:   `"a\";b"`,
+			wantParam:    `a";b`,
+			wantSpelling: `"a\";b"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			built := NewBuilder().
+				WithType("text").WithSubType("plain").
+				WithParam("name", tt.paramValue).
+				MustBuild()
+
+			if got, ok := built.Param("name"); !ok || got != tt.wantParam {
+				t.Errorf("Param(name) = (%q, %v), want (%q, true)", got, ok, tt.wantParam)
+			}
+
+			spelling, _ := built.params.Get("name")
+			if spelling != tt.wantSpelling {
+				t.Errorf("stored spelling = %q, want %q", spelling, tt.wantSpelling)
+			}
+
+			wantString := "text/plain;name=" + tt.wantSpelling
+			if built.String() != wantString {
+				t.Errorf("String() = %q, want %q", built.String(), wantString)
+			}
+
+			// The canonical form has to parse back to the same value.
+			reparsed, err := Parse(built.String())
+			if err != nil {
+				t.Fatalf("Parse(%q) failed: %v", built.String(), err)
+			}
+			if !reparsed.Equals(built) {
+				t.Errorf("round trip = %q, want %q", reparsed.String(), built.String())
+			}
+		})
 	}
 }

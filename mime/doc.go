@@ -9,10 +9,16 @@
 // [MIME] values expose component accessors ([MIME.Type],
 // [MIME.SubType], [MIME.Charset], [MIME.Param]), comparison helpers
 // ([MIME.Equals], [MIME.EqualsTypeAndSubtype], [MIME.IsCompatibleWith]),
-// and wildcard predicates ([MIME.IsWildcardType], [MIME.IsConcrete],
-// [MIME.Includes]).
+// and matching predicates ([MIME.IsWildcardType], [MIME.IsConcrete],
+// [MIME.Includes], [MIME.IsPresentIn]), which treat wildcards and
+// parameters as patterns to satisfy.
+//
+// A built [MIME] is immutable and safe for concurrent use: [MIME.String]
+// renders parameters in ascending key order, and parameters are reported
+// with their quoting removed.
 //
 // Category helpers [IsText], [IsImage], [IsAudio], [IsVideo], and
 // [IsApplication] test the primary type. [NormalizeXSubtype] folds
-// legacy "x-" subtypes (RFC 6648) onto their modern equivalents.
+// legacy "x-" subtypes (RFC 6648) onto their modern equivalents, which
+// [RegisterXSubtype] / [RegisterXSubtypes] can extend.
 package mime

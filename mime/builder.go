@@ -2,13 +2,13 @@ package mime
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/bits-and-blooms/bitset"
 
 	"github.com/Tangerg/pkg/assert"
 	"github.com/Tangerg/pkg/maps"
-	pkgStrings "github.com/Tangerg/pkg/strings"
 )
 
 // tokenBitSet marks the ASCII characters allowed in a MIME token per
@@ -51,31 +51,44 @@ func NewBuilder() *Builder {
 		mime: &MIME{
 			_type:   wildcardType,
 			subType: wildcardType,
-			charset: "",
 			params:  maps.NewHashMap[string, string](),
 		},
 	}
 }
 
-// checkToken returns an error if token contains a non-token character.
-func (b *Builder) checkToken(token string) error {
+// tokenInvalidChar returns the first rune of token that RFC 2045 does not
+// allow in a token, and whether such a rune exists.
+func tokenInvalidChar(token string) (rune, bool) {
 	for _, char := range token {
 		if !tokenBitSet.Test(uint(char)) {
-			return fmt.Errorf("invalid character %s in token: %s", string(char), token)
+			return char, true
 		}
+	}
+	return 0, false
+}
+
+// isToken reports whether token contains only token characters.
+func isToken(token string) bool {
+	_, invalid := tokenInvalidChar(token)
+	return !invalid
+}
+
+// checkToken returns an error if token contains a non-token character.
+func (b *Builder) checkToken(token string) error {
+	if char, invalid := tokenInvalidChar(token); invalid {
+		return fmt.Errorf("invalid character %s in token: %s", string(char), token)
 	}
 	return nil
 }
 
-// checkParam validates a parameter key/value pair. The value may be a
-// quoted string or a token; the key must always be a token.
+// checkParam validates a parameter key/value pair. The value must be a token
+// or a double-quoted string; the key must always be a token.
 func (b *Builder) checkParam(paramKey string, paramValue string) error {
 	if err := b.checkToken(paramKey); err != nil {
 		return err
 	}
 
-	// Skip validation for quoted strings (they can contain any character)
-	if pkgStrings.IsQuoted(paramValue) {
+	if isQuotedSpelling(paramValue) {
 		return nil
 	}
 
@@ -95,37 +108,41 @@ func (b *Builder) checkParams() error {
 // WithType sets the primary type, lower-casing the input and stripping
 // surrounding quotes.
 func (b *Builder) WithType(mimeType string) *Builder {
-	normalizedType := pkgStrings.UnQuote(strings.ToLower(mimeType))
-	b.mime._type = normalizedType
+	b.mime._type = normalizeTypeComponent(mimeType)
 	return b
 }
 
 // WithSubType sets the subtype, lower-casing the input and stripping
 // surrounding quotes.
 func (b *Builder) WithSubType(mimeSubType string) *Builder {
-	normalizedSubType := pkgStrings.UnQuote(strings.ToLower(mimeSubType))
-	b.mime.subType = normalizedSubType
+	b.mime.subType = normalizeTypeComponent(mimeSubType)
 	return b
 }
 
-// WithCharset sets the charset parameter, upper-casing the value and
-// stripping surrounding quotes. An empty value is a no-op.
+// WithCharset sets the charset parameter, upper-casing the value. A
+// double-quoted value is decoded first; an empty value is a no-op.
 func (b *Builder) WithCharset(charsetValue string) *Builder {
-	normalizedCharset := pkgStrings.UnQuote(strings.ToUpper(charsetValue))
+	normalizedCharset := strings.ToUpper(decodeParamValue(charsetValue))
 	if normalizedCharset == "" {
 		return b
 	}
 
-	b.mime.charset = normalizedCharset
-	b.mime.params.Put(paramCharset, normalizedCharset)
+	spelling := normalizedCharset
+	if isQuotedSpelling(charsetValue) {
+		spelling = encodeParamValue(normalizedCharset)
+	}
+
+	b.mime.params.Put(paramCharset, spelling)
 	return b
 }
 
 // WithParam adds a parameter. The key is lower-cased and stripped of
-// surrounding quotes; an empty key is a no-op. A "charset" key is
-// forwarded to [Builder.WithCharset].
+// surrounding quotes; an empty key is a no-op. A "charset" key is forwarded to
+// [Builder.WithCharset]. A double-quoted value is decoded and re-encoded in
+// canonical spelling; an unquoted value has to be a token, which
+// [Builder.Build] verifies.
 func (b *Builder) WithParam(paramKey string, paramValue string) *Builder {
-	normalizedKey := pkgStrings.UnQuote(strings.ToLower(paramKey))
+	normalizedKey := normalizeParamKey(paramKey)
 	if normalizedKey == "" {
 		return b
 	}
@@ -134,20 +151,33 @@ func (b *Builder) WithParam(paramKey string, paramValue string) *Builder {
 		return b.WithCharset(paramValue)
 	}
 
+	if isQuotedSpelling(paramValue) {
+		paramValue = encodeParamValue(decodeParamValue(paramValue))
+	}
+
 	b.mime.params.Put(normalizedKey, paramValue)
 	return b
 }
 
 // WithParams adds every entry of paramMap via [Builder.WithParam].
 func (b *Builder) WithParams(paramMap map[string]string) *Builder {
-	for paramKey, paramValue := range paramMap {
-		b.WithParam(paramKey, paramValue)
+	// Applying in a fixed order keeps the result stable when the map holds two
+	// spellings of one parameter name.
+	paramKeys := make([]string, 0, len(paramMap))
+	for paramKey := range paramMap {
+		paramKeys = append(paramKeys, paramKey)
+	}
+	slices.Sort(paramKeys)
+
+	for _, paramKey := range paramKeys {
+		b.WithParam(paramKey, paramMap[paramKey])
 	}
 	return b
 }
 
-// FromMime copies type, subtype, charset, and parameters from
-// sourceMime into the builder. A nil source is a no-op.
+// FromMime copies type, subtype, and parameters from sourceMime into the
+// builder. A nil source is a no-op. The canonical string is not copied; the
+// next [Builder.Build] derives it from the copied components.
 func (b *Builder) FromMime(sourceMime *MIME) *Builder {
 	if sourceMime == nil {
 		return b
@@ -155,44 +185,36 @@ func (b *Builder) FromMime(sourceMime *MIME) *Builder {
 
 	b.mime._type = sourceMime._type
 	b.mime.subType = sourceMime.subType
-	b.mime.charset = sourceMime.charset
 	b.mime.params = sourceMime.params.Clone().(maps.HashMap[string, string])
-	b.mime.cachedString = sourceMime.cachedString
 
 	return b
 }
 
-// Build validates the configured components and returns the assembled
-// [MIME]. Empty type or subtype default to "*". An invalid token in
-// any component produces an error.
+// Build validates the configured components and returns the assembled [MIME].
+// Empty type or subtype default to "*". An invalid token in any component
+// produces an error. The result shares no state with the builder.
 func (b *Builder) Build() (*MIME, error) {
 	if b.mime._type == "" {
 		b.mime._type = wildcardType
-	} else {
-		if err := b.checkToken(b.mime._type); err != nil {
-			return nil, err
-		}
+	} else if err := b.checkToken(b.mime._type); err != nil {
+		return nil, err
 	}
 
 	if b.mime.subType == "" {
 		b.mime.subType = wildcardType
-	} else {
-		if err := b.checkToken(b.mime.subType); err != nil {
-			return nil, err
-		}
-	}
-
-	if b.mime.charset != "" {
-		if err := b.checkToken(b.mime.charset); err != nil {
-			return nil, err
-		}
+	} else if err := b.checkToken(b.mime.subType); err != nil {
+		return nil, err
 	}
 
 	if err := b.checkParams(); err != nil {
 		return nil, err
 	}
 
-	return b.mime, nil
+	built := *b.mime
+	built.params = b.mime.params.Clone().(maps.HashMap[string, string])
+	built.cachedString = built.formatStringValue()
+
+	return &built, nil
 }
 
 // MustBuild calls [Builder.Build] and panics on error.

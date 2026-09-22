@@ -2,9 +2,12 @@ package mime
 
 import (
 	"encoding/json"
+	"errors"
+	"slices"
 	"strings"
 
 	"github.com/Tangerg/pkg/maps"
+	pkgStrings "github.com/Tangerg/pkg/strings"
 )
 
 const (
@@ -12,14 +15,18 @@ const (
 	paramCharset = "charset"
 )
 
-// MIME represents a parsed MIME type with its primary type, subtype,
-// optional charset, and additional parameters. Construct values with
-// [New], [Parse], or [Builder]; instances are immutable once built.
+// MIME represents a parsed MIME type: a primary type, a subtype, and
+// parameters such as the charset. Construct values with [New], [Parse], or
+// [Builder]; a built value is immutable and safe for concurrent use.
 type MIME struct {
-	_type        string
-	subType      string
-	charset      string
-	params       maps.HashMap[string, string]
+	_type   string
+	subType string
+	// params maps each parameter name to its canonical spelling: a bare token,
+	// or a quoted string when the value cannot be a token. Accessors decode the
+	// spelling; [MIME.String] emits it verbatim.
+	params maps.HashMap[string, string]
+	// cachedString is the [MIME.String] result, computed once by the builder.
+	// Values assembled without a builder derive it on every call.
 	cachedString string
 }
 
@@ -31,42 +38,48 @@ func (m *MIME) MarshalJSON() ([]byte, error) {
 	return json.Marshal(m.String())
 }
 
-// UnmarshalJSON decodes a JSON-quoted MIME type string into m.
+// UnmarshalJSON decodes a JSON-quoted MIME type string into m. A nil receiver
+// is an error rather than a panic.
 func (m *MIME) UnmarshalJSON(data []byte) error {
-	var s string
-	if err := json.Unmarshal(data, &s); err != nil {
+	if m == nil {
+		return errors.New("mime: UnmarshalJSON called on a nil *MIME")
+	}
+
+	var mimeString string
+	if err := json.Unmarshal(data, &mimeString); err != nil {
 		return err
 	}
-	parsed, err := Parse(s)
+
+	parsed, err := Parse(mimeString)
 	if err != nil {
 		return err
 	}
 
-	m._type = parsed._type
-	m.subType = parsed.subType
-	m.charset = parsed.charset
-	m.params = parsed.params
-	m.cachedString = parsed.cachedString
+	*m = *parsed
 
 	return nil
 }
 
-// formatStringValue builds and caches the "type/subtype;k=v" form.
-func (m *MIME) formatStringValue() {
-	stringBuilder := strings.Builder{}
+// formatStringValue renders the "type/subtype;k=v" form. Parameters are
+// emitted in ascending key order so the result depends only on the components.
+func (m *MIME) formatStringValue() string {
+	var stringBuilder strings.Builder
 
 	stringBuilder.WriteString(m._type)
 	stringBuilder.WriteString("/")
 	stringBuilder.WriteString(m.subType)
 
-	m.params.ForEach(func(paramKey, paramValue string) {
+	paramKeys := m.params.Keys()
+	slices.Sort(paramKeys)
+	for _, paramKey := range paramKeys {
+		paramValue, _ := m.params.Get(paramKey)
 		stringBuilder.WriteString(";")
 		stringBuilder.WriteString(paramKey)
 		stringBuilder.WriteString("=")
 		stringBuilder.WriteString(paramValue)
-	})
+	}
 
-	m.cachedString = stringBuilder.String()
+	return stringBuilder.String()
 }
 
 // Type returns the primary type, e.g. "text" for "text/html".
@@ -89,32 +102,117 @@ func (m *MIME) FullType() string {
 	return m.TypeAndSubType()
 }
 
-// Charset returns the charset parameter value, or "" if unset.
+// Charset returns the decoded charset parameter value, or "" if unset.
 func (m *MIME) Charset() string {
-	return m.charset
+	charsetValue, _ := m.params.Get(paramCharset)
+	return decodeParamValue(charsetValue)
 }
 
-// Param returns the value of the named parameter and whether it is set.
+// Param returns the decoded value of the named parameter and whether it is set.
 func (m *MIME) Param(paramKey string) (string, bool) {
-	return m.params.Get(paramKey)
+	paramValue, ok := m.params.Get(paramKey)
+	return decodeParamValue(paramValue), ok
 }
 
-// Params returns the parameter map. The returned map is owned by m and
-// must not be modified by the caller.
+// Params returns a copy of the parameters with values decoded. Mutating the
+// result does not affect m.
 func (m *MIME) Params() map[string]string {
-	return m.params
+	params := make(map[string]string, m.params.Size())
+	for paramKey, paramValue := range m.params {
+		params[paramKey] = decodeParamValue(paramValue)
+	}
+	return params
 }
 
-// String returns the canonical "type/subtype;k=v" form. The result is
-// cached on first call. A nil receiver returns "".
+// String returns the canonical "type/subtype;k=v" form, with parameters in
+// ascending key order and values in canonical spelling. A nil receiver
+// returns "".
 func (m *MIME) String() string {
 	if m == nil {
 		return ""
 	}
-	if m.cachedString == "" {
-		m.formatStringValue()
+	if m.cachedString != "" {
+		return m.cachedString
 	}
-	return m.cachedString
+	return m.formatStringValue()
+}
+
+// stripQuotes removes every layer of surrounding quotes. Single-layer
+// [pkgStrings.UnQuote] would not be idempotent, and a value that stays quoted
+// after one pass could be emptied by the next one.
+func stripQuotes(value string) string {
+	for pkgStrings.IsQuoted(value) {
+		value = pkgStrings.UnQuote(value)
+	}
+	return value
+}
+
+// normalizeTypeComponent returns the primary type or subtype the builder
+// stores: lower-cased, with every layer of surrounding quotes removed.
+func normalizeTypeComponent(component string) string {
+	return stripQuotes(strings.ToLower(component))
+}
+
+// normalizeParamKey returns the name a parameter is stored under: lower-cased,
+// with every layer of surrounding quotes removed. Spellings that normalize to
+// the same name denote the same parameter.
+func normalizeParamKey(paramKey string) string {
+	return stripQuotes(strings.ToLower(paramKey))
+}
+
+// isQuotedSpelling reports whether value is written as an RFC 2045
+// quoted-string, which uses the double quote only. A single-quoted spelling is
+// deliberately not recognized: "'" is a valid token character, so reading runs
+// of it as quoting would make a spelled value ambiguous when it is parsed back.
+func isQuotedSpelling(value string) bool {
+	return len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"'
+}
+
+// decodeParamValue returns the value a parameter spelling denotes: a quoted
+// spelling loses its surrounding quotes and the backslashes that escape the
+// character after them.
+func decodeParamValue(spelling string) string {
+	if !isQuotedSpelling(spelling) {
+		return spelling
+	}
+
+	quoted := spelling[1 : len(spelling)-1]
+	if !strings.ContainsRune(quoted, '\\') {
+		return quoted
+	}
+
+	var decoded strings.Builder
+	decoded.Grow(len(quoted))
+	for i := 0; i < len(quoted); i++ {
+		if quoted[i] == '\\' && i+1 < len(quoted) {
+			i++
+		}
+		decoded.WriteByte(quoted[i])
+	}
+
+	return decoded.String()
+}
+
+// encodeParamValue returns the canonical spelling of a parameter value: the
+// value itself when it is a token, otherwise a quoted string with '"' and '\'
+// escaped.
+func encodeParamValue(value string) string {
+	if isToken(value) {
+		return value
+	}
+
+	var encoded strings.Builder
+	encoded.Grow(len(value) + 2)
+	encoded.WriteByte('"')
+	for i := 0; i < len(value); i++ {
+		if value[i] == '"' || value[i] == '\\' {
+			encoded.WriteByte('\\')
+		}
+		encoded.WriteByte(value[i])
+	}
+	encoded.WriteByte('"')
+
+	return encoded.String()
 }
 
 // IsWildcardType reports whether the primary type is "*".
@@ -143,54 +241,68 @@ func (m *MIME) GetSubtypeSuffix() string {
 	return ""
 }
 
-// Includes reports whether m is a superset of otherMime under the
-// MIME wildcard rules. For example, "text/*" includes "text/html" and
-// "application/*+json" includes "application/vnd.api+json".
+// Includes reports whether m is a superset of otherMime: the type and subtype
+// must cover otherMime under the MIME wildcard rules, and every parameter of m
+// must be present in otherMime with the same value. For example, "text/*"
+// includes "text/html", "application/*+json" includes
+// "application/vnd.api+json", and "text/html;charset=UTF-8" includes
+// "text/html;charset=UTF-8;version=1" but not a bare "text/html".
 func (m *MIME) Includes(otherMime *MIME) bool {
 	if otherMime == nil {
 		return false
 	}
 
-	// Wildcard type includes all types
+	return m.coversTypeAndSubtype(otherMime) && m.paramsIncludedIn(otherMime)
+}
+
+// coversTypeAndSubtype reports whether m's type and subtype cover otherMime's
+// under the MIME wildcard rules.
+func (m *MIME) coversTypeAndSubtype(otherMime *MIME) bool {
 	if m.IsWildcardType() {
 		return true
 	}
 
-	// Type must match if not wildcard
 	if !m.EqualsType(otherMime) {
 		return false
 	}
 
-	// Exact subtype match
 	if m.EqualsSubtype(otherMime) {
 		return true
 	}
 
-	// Non-wildcard subtype doesn't include others
 	if !m.IsWildcardSubType() {
 		return false
 	}
 
-	// Handle wildcard subtype with suffix matching
-	currentPlusIndex := strings.LastIndexByte(m.subType, '+')
-	if currentPlusIndex == -1 {
+	plusIndex := strings.LastIndexByte(m.subType, '+')
+	if plusIndex == -1 {
 		return true
 	}
 
+	// m is a "*+suffix" pattern, so the part before '+' is the wildcard itself.
 	otherPlusIndex := strings.LastIndexByte(otherMime.subType, '+')
 	if otherPlusIndex == -1 {
 		return false
 	}
 
-	currentSubtypePrefix := m.subType[0:currentPlusIndex]
-	currentSubtypeSuffix := m.subType[currentPlusIndex+1:]
-	otherSubtypeSuffix := otherMime.subType[otherPlusIndex+1:]
-
-	return currentSubtypeSuffix == otherSubtypeSuffix && currentSubtypePrefix == wildcardType
+	return m.subType[plusIndex+1:] == otherMime.subType[otherPlusIndex+1:]
 }
 
-// IsCompatibleWith reports whether m and otherMime include each other
-// in either direction.
+// paramsIncludedIn reports whether every parameter of m is present in
+// otherMime with the same decoded value.
+func (m *MIME) paramsIncludedIn(otherMime *MIME) bool {
+	for paramKey, paramValue := range m.params {
+		otherValue, ok := otherMime.params.Get(paramKey)
+		if !ok || decodeParamValue(paramValue) != decodeParamValue(otherValue) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// IsCompatibleWith reports whether either value includes the other, so a
+// wildcard or a parameter-less value is compatible with a narrower one.
 func (m *MIME) IsCompatibleWith(otherMime *MIME) bool {
 	if otherMime == nil {
 		return false
@@ -223,7 +335,8 @@ func (m *MIME) EqualsTypeAndSubtype(otherMime *MIME) bool {
 	return m.EqualsType(otherMime) && m.EqualsSubtype(otherMime)
 }
 
-// EqualsParams reports whether the parameter maps are identical.
+// EqualsParams reports whether both MIMEs carry the same parameters, comparing
+// decoded values.
 func (m *MIME) EqualsParams(otherMime *MIME) bool {
 	if otherMime == nil {
 		return false
@@ -233,19 +346,14 @@ func (m *MIME) EqualsParams(otherMime *MIME) bool {
 		return false
 	}
 
-	parametersEqual := true
-	m.params.ForEach(func(paramKey, paramValue string) {
+	for paramKey, paramValue := range m.params {
 		otherValue, ok := otherMime.params.Get(paramKey)
-		if ok {
-			if paramValue != otherValue {
-				parametersEqual = false
-			}
-		} else {
-			parametersEqual = false
+		if !ok || decodeParamValue(paramValue) != decodeParamValue(otherValue) {
+			return false
 		}
-	})
+	}
 
-	return parametersEqual
+	return true
 }
 
 // EqualsCharset reports whether the charset values match.
@@ -253,7 +361,7 @@ func (m *MIME) EqualsCharset(otherMime *MIME) bool {
 	if otherMime == nil {
 		return false
 	}
-	return m.charset == otherMime.charset
+	return m.Charset() == otherMime.Charset()
 }
 
 // Equals reports whether m and otherMime have the same type, subtype,
@@ -267,11 +375,16 @@ func (m *MIME) Equals(otherMime *MIME) bool {
 		m.EqualsParams(otherMime)
 }
 
-// IsPresentIn reports whether mimeList contains a type whose primary
-// type and subtype match m. Parameters are ignored.
+// IsPresentIn reports whether any type in mimeList includes m, so an entry may
+// be a wildcard ("text/*") or carry parameters that m has to satisfy. A nil
+// entry never matches. Use [MIME.EqualsTypeAndSubtype] for literal equality of
+// type and subtype.
 func (m *MIME) IsPresentIn(mimeList []*MIME) bool {
 	for _, mimeType := range mimeList {
-		if mimeType.EqualsTypeAndSubtype(m) {
+		if mimeType == nil {
+			continue
+		}
+		if mimeType.Includes(m) {
 			return true
 		}
 	}
@@ -309,15 +422,35 @@ func (m *MIME) IsMoreSpecific(otherMime *MIME) bool {
 	return false
 }
 
-// IsLessSpecific is the inverse of [MIME.IsMoreSpecific].
+// IsLessSpecific reports whether m is strictly less specific than otherMime,
+// that is, whether otherMime is more specific than m. Equally specific and
+// uncomparable values are false for both predicates.
 func (m *MIME) IsLessSpecific(otherMime *MIME) bool {
-	return !m.IsMoreSpecific(otherMime)
+	if otherMime == nil {
+		return false
+	}
+	return otherMime.IsMoreSpecific(m)
 }
 
-// Clone returns a deep copy of m with its own parameter map.
+// Clone returns a copy of m with its own parameter map. A nil receiver returns
+// nil.
 func (m *MIME) Clone() *MIME {
-	clonedMime, _ := NewBuilder().
-		FromMime(m).
-		Build()
-	return clonedMime
+	if m == nil {
+		return nil
+	}
+
+	cloned := *m
+	cloned.params = m.params.Clone().(maps.HashMap[string, string])
+
+	return &cloned
+}
+
+// withSubType returns a copy of m with subType replaced, without validation.
+// It derives a new value from a known-good one, as [NormalizeXSubtype] does
+// with its registered mappings.
+func (m *MIME) withSubType(subType string) *MIME {
+	derived := m.Clone()
+	derived.subType = subType
+	derived.cachedString = derived.formatStringValue()
+	return derived
 }

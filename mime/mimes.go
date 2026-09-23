@@ -695,8 +695,9 @@ func init() {
 
 // StringTypeByExtension returns the MIME type string for the extension of
 // filePath: the canonical form of the package's table entry, then the standard
-// library's mime package, and "application/octet-stream" if neither matches.
-// Safe for concurrent use.
+// library's mime package, which may answer from platform-specific files, and
+// "application/octet-stream" if neither matches. A standard library value that
+// does not parse is returned verbatim. Safe for concurrent use.
 func StringTypeByExtension(filePath string) string {
 	fileExtension := strings.ToLower(path.Ext(filePath))
 
@@ -722,8 +723,9 @@ func StringTypeByExtension(filePath string) string {
 }
 
 // TypeByExtension returns a [MIME] for the extension of filePath and
-// whether it was found in the package's table. The returned value is a
-// clone and may be mutated freely. Safe for concurrent use.
+// whether it was found in the package's table; unlike [StringTypeByExtension]
+// it does not fall back to the standard library. The returned value is a clone
+// and may be mutated freely. Safe for concurrent use.
 func TypeByExtension(filePath string) (*MIME, bool) {
 	fileExtension := strings.ToLower(path.Ext(filePath))
 

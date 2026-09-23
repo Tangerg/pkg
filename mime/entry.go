@@ -12,7 +12,7 @@ import (
 	"github.com/Tangerg/pkg/maps"
 )
 
-// Category prototypes used by the Is* helpers; only their type and
+// Category prototypes for the Is* helpers and the "*/*" case. Only the type and
 // subtype fields are consulted.
 var (
 	all         = MIME{_type: wildcardType, subType: wildcardType}
@@ -23,12 +23,13 @@ var (
 	application = MIME{_type: "application", subType: wildcardType}
 )
 
-// ErrorInvalidMimeType is returned by [Parse] when the input does not
-// conform to RFC 2045 / 2046 syntax.
+// ErrorInvalidMimeType is reported by [Parse] for input it rejects: a missing
+// type or subtype, a wildcard primary type outside "*/*", or a malformed
+// parameter. Every [Parse] error wraps it.
 var ErrorInvalidMimeType = errors.New("invalid mime type")
 
 // New returns a [MIME] with the given primary type and subtype and no
-// parameters.
+// parameters. An empty component defaults to "*", as in [Builder.Build].
 func New(mimeType string, subType string) (*MIME, error) {
 	return NewBuilder().
 		WithType(mimeType).
@@ -41,15 +42,17 @@ func MustNew(mimeType string, subType string) *MIME {
 	return assert.Must(New(mimeType, subType))
 }
 
-// Parse decodes a MIME type string such as "text/html; charset=UTF-8"
-// into a [MIME]. A bare "*" is treated as "*/*". Double-quoted parameter values
-// (RFC 2045) are decoded and re-encoded in canonical spelling; [MIME.Param] and
-// [MIME.String] therefore work with the value rather than the quoting.
+// Parse decodes a MIME type string such as "text/html; charset=UTF-8" into a
+// [MIME]. A bare "*" is treated as "*/*", the only spelling in which a wildcard
+// primary type is accepted. Double-quoted parameter values (RFC 2045) are
+// decoded and re-encoded in canonical spelling; [MIME.Param] and [MIME.String]
+// therefore work with the value rather than the quoting.
 //
 // Malformed parameters are reported instead of dropped: a parameter without
 // "=", a parameter without a name, or a repeated parameter name (compared
-// case-insensitively) returns [ErrorInvalidMimeType]. An empty value and empty
-// segments, such as a trailing ";", are accepted.
+// case-insensitively) returns [ErrorInvalidMimeType]. Empty segments, such as a
+// trailing ";", and empty parameter values are accepted; an empty charset value
+// sets no parameter, while any other parameter keeps its empty value.
 func Parse(mimeString string) (*MIME, error) {
 	segments := paramSegments(mimeString)
 	typeSubtypeString := strings.TrimSpace(segments[0])
@@ -146,8 +149,8 @@ func paramSegments(mimeString string) []string {
 	return append(segments, mimeString[segmentStart:])
 }
 
-// Detect returns the MIME type inferred from the magic bytes of
-// dataBytes.
+// Detect returns the MIME type inferred from the content of dataBytes. The
+// result may carry a charset parameter for text.
 func Detect(dataBytes []byte) (*MIME, error) {
 	detectedMime := mimetype.Detect(dataBytes)
 	return Parse(detectedMime.String())

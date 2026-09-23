@@ -11,8 +11,9 @@ import (
 	"github.com/Tangerg/pkg/maps"
 )
 
-// tokenBitSet marks the ASCII characters allowed in a MIME token per
-// RFC 2045 (control characters and tspecials are disallowed).
+// tokenBitSet marks the ASCII characters allowed in a MIME token: RFC 2045
+// excludes control characters, space, tab, and tspecials, and this table is
+// stricter by also excluding "{" and "}".
 var tokenBitSet *bitset.BitSet
 
 func init() {
@@ -23,6 +24,8 @@ func init() {
 	controlChars.Set(127)
 
 	separatorChars := bitset.New(128)
+	// ASCII codes of the characters a token must not contain: RFC 2045
+	// tspecials, plus space, tab, and the "{" and "}" tokenBitSet excludes.
 	separatorPositions := []uint{40, 41, 60, 62, 64, 44, 59, 58, 92, 34, 47, 91, 93, 63, 61, 123, 125, 32, 9}
 	for _, position := range separatorPositions {
 		separatorChars.Set(position)
@@ -81,8 +84,9 @@ func (b *Builder) checkToken(token string) error {
 	return nil
 }
 
-// checkParam validates a parameter key/value pair. The value must be a token
-// or a double-quoted string; the key must always be a token.
+// checkParam validates a parameter key/value pair. The key must be a token; the
+// value must be a token or a double-quoted string whose contents are accepted
+// without further checks.
 func (b *Builder) checkParam(paramKey string, paramValue string) error {
 	if err := b.checkToken(paramKey); err != nil {
 		return err
@@ -119,8 +123,9 @@ func (b *Builder) WithSubType(mimeSubType string) *Builder {
 	return b
 }
 
-// WithCharset sets the charset parameter, upper-casing the value. A
-// double-quoted value is decoded first; an empty value is a no-op.
+// WithCharset sets the charset parameter, upper-casing the value because
+// charset names are case-insensitive. A double-quoted value is decoded first;
+// an empty value is a no-op, so it cannot clear an existing charset.
 func (b *Builder) WithCharset(charsetValue string) *Builder {
 	normalizedCharset := strings.ToUpper(decodeParamValue(charsetValue))
 	if normalizedCharset == "" {

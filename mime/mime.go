@@ -17,7 +17,8 @@ const (
 
 // MIME represents a parsed MIME type: a primary type, a subtype, and
 // parameters such as the charset. Construct values with [New], [Parse], or
-// [Builder]; a built value is immutable and safe for concurrent use.
+// [Builder]; a built value is immutable and safe for concurrent use. The zero
+// value holds no type and renders as "/".
 type MIME struct {
 	_type   string
 	subType string
@@ -30,7 +31,8 @@ type MIME struct {
 	cachedString string
 }
 
-// MarshalJSON encodes m as its canonical string form, JSON-quoted.
+// MarshalJSON encodes m as its canonical string form, JSON-quoted. A nil
+// receiver encodes as null.
 func (m *MIME) MarshalJSON() ([]byte, error) {
 	if m == nil {
 		return []byte("null"), nil
@@ -39,7 +41,8 @@ func (m *MIME) MarshalJSON() ([]byte, error) {
 }
 
 // UnmarshalJSON decodes a JSON-quoted MIME type string into m. A nil receiver
-// is an error rather than a panic.
+// is an error rather than a panic, and JSON null is rejected: it carries no
+// type.
 func (m *MIME) UnmarshalJSON(data []byte) error {
 	if m == nil {
 		return errors.New("mime: UnmarshalJSON called on a nil *MIME")
@@ -102,7 +105,8 @@ func (m *MIME) FullType() string {
 	return m.TypeAndSubType()
 }
 
-// Charset returns the decoded charset parameter value, or "" if unset.
+// Charset returns the decoded charset parameter value, or "" if unset. Values
+// set through [Builder] or [Parse] are upper-cased.
 func (m *MIME) Charset() string {
 	charsetValue, _ := m.params.Get(paramCharset)
 	return decodeParamValue(charsetValue)
@@ -137,9 +141,10 @@ func (m *MIME) String() string {
 	return m.formatStringValue()
 }
 
-// stripQuotes removes every layer of surrounding quotes. Single-layer
-// [pkgStrings.UnQuote] would not be idempotent, and a value that stays quoted
-// after one pass could be emptied by the next one.
+// stripQuotes removes every layer of surrounding quotes, of either quote
+// character ([pkgStrings.IsQuoted]). Single-layer [pkgStrings.UnQuote] would
+// not be idempotent, and a value that stays quoted after one pass could be
+// emptied by the next one.
 func stripQuotes(value string) string {
 	for pkgStrings.IsQuoted(value) {
 		value = pkgStrings.UnQuote(value)
@@ -231,8 +236,8 @@ func (m *MIME) IsConcrete() bool {
 	return !m.IsWildcardType() && !m.IsWildcardSubType()
 }
 
-// GetSubtypeSuffix returns the part after the last '+' in the subtype,
-// or "" if none. For "application/vnd.api+json" it returns "json".
+// GetSubtypeSuffix returns the part after the last '+' in the subtype, or "" if
+// there is none, e.g. "json" for "application/vnd.api+json".
 func (m *MIME) GetSubtypeSuffix() string {
 	plusIndex := strings.LastIndexByte(m.subType, '+')
 	if plusIndex != -1 && len(m.subType) > plusIndex {
@@ -391,9 +396,12 @@ func (m *MIME) IsPresentIn(mimeList []*MIME) bool {
 	return false
 }
 
-// IsMoreSpecific reports whether m is strictly more specific than
-// otherMime: concrete components beat wildcards, and for equal
-// type/subtype the value with more parameters wins.
+// IsMoreSpecific reports whether m is strictly more specific than otherMime:
+// concrete components beat wildcards, and for equal type/subtype the value with
+// more parameters wins. Specificity follows wildcard-ness rather than coverage,
+// so "application/vnd.api+xml" is reported more specific than
+// "application/*+json" even though neither includes the other; use
+// [MIME.Includes] to test coverage.
 func (m *MIME) IsMoreSpecific(otherMime *MIME) bool {
 	if otherMime == nil {
 		return false
@@ -423,8 +431,8 @@ func (m *MIME) IsMoreSpecific(otherMime *MIME) bool {
 }
 
 // IsLessSpecific reports whether m is strictly less specific than otherMime,
-// that is, whether otherMime is more specific than m. Equally specific and
-// uncomparable values are false for both predicates.
+// that is, whether otherMime is more specific than m. Equally specific values
+// are false for both predicates.
 func (m *MIME) IsLessSpecific(otherMime *MIME) bool {
 	if otherMime == nil {
 		return false

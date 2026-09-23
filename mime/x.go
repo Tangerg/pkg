@@ -68,7 +68,6 @@ var xPrefixSubtypeToStandard = map[string]string{
 	"x-quicktime":       "quicktime",
 }
 
-// xPrefixMutex guards xPrefixSubtypeToStandard.
 var xPrefixMutex sync.RWMutex
 
 // RegisterXSubtype registers an "x-" subtype mapping consulted by

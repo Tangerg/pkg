@@ -43,12 +43,18 @@ func TestNew(t *testing.T) {
 			checkSub:    "png",
 		},
 		{
-			name:        "empty type",
+			name:        "empty type with a concrete subtype",
 			mimeType:    "",
 			subType:     "html",
+			shouldError: true,
+		},
+		{
+			name:        "empty type with a wildcard subtype",
+			mimeType:    "",
+			subType:     "*",
 			shouldError: false,
 			checkType:   "*",
-			checkSub:    "html",
+			checkSub:    "*",
 		},
 		{
 			name:        "empty subtype",
@@ -895,6 +901,82 @@ func TestParse_QuotedParameters(t *testing.T) {
 			}
 			if got := parsed.String(); got != tt.wantString {
 				t.Errorf("String() = %q, want %q", got, tt.wantString)
+			}
+
+			reparsed, err := Parse(parsed.String())
+			if err != nil {
+				t.Fatalf("Parse(%q) failed: %v", parsed.String(), err)
+			}
+			if !reparsed.Equals(parsed) {
+				t.Errorf("round trip = %q, want %q", reparsed.String(), parsed.String())
+			}
+		})
+	}
+}
+
+// TestParse_SingleQuotesAreTokens verifies that only the double quote denotes a
+// quoted-string. The single quote is a token character, so a single-quoted
+// spelling survives [Parse] as written instead of being silently unquoted, in
+// type components and parameter keys as much as in parameter values.
+func TestParse_SingleQuotesAreTokens(t *testing.T) {
+	tests := []struct {
+		name        string
+		mimeString  string
+		wantType    string
+		wantSubType string
+		wantParam   string
+		wantValue   string
+	}{
+		{
+			name:        "single-quoted type and subtype",
+			mimeString:  `'text'/'html'`,
+			wantType:    "'text'",
+			wantSubType: "'html'",
+		},
+		{
+			name:        "single-quoted subtype",
+			mimeString:  `text/'html'`,
+			wantType:    "text",
+			wantSubType: "'html'",
+		},
+		{
+			name:        "single-quoted parameter key",
+			mimeString:  `text/plain; 'name'=x`,
+			wantType:    "text",
+			wantSubType: "plain",
+			wantParam:   "'name'",
+			wantValue:   "x",
+		},
+		{
+			name:        "single-quoted parameter value keeps its quotes",
+			mimeString:  `text/plain; name='a'`,
+			wantType:    "text",
+			wantSubType: "plain",
+			wantParam:   "name",
+			wantValue:   "'a'",
+		},
+		{
+			name:        "double-quoted subtype is unquoted",
+			mimeString:  `text/"html"`,
+			wantType:    "text",
+			wantSubType: "html",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.mimeString)
+			if err != nil {
+				t.Fatalf("Parse(%q) failed: %v", tt.mimeString, err)
+			}
+			if parsed.Type() != tt.wantType || parsed.SubType() != tt.wantSubType {
+				t.Errorf("Parse(%q) = %q/%q, want %q/%q",
+					tt.mimeString, parsed.Type(), parsed.SubType(), tt.wantType, tt.wantSubType)
+			}
+			if tt.wantParam != "" {
+				if got, ok := parsed.Param(tt.wantParam); !ok || got != tt.wantValue {
+					t.Errorf("Param(%q) = (%q, %v), want (%q, true)", tt.wantParam, got, ok, tt.wantValue)
+				}
 			}
 
 			reparsed, err := Parse(parsed.String())

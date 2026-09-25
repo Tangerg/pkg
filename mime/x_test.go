@@ -1,6 +1,7 @@
 package mime
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -39,7 +40,9 @@ func TestRegisterXSubtype(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Register mapping
-			RegisterXSubtype(tt.xSubtype, tt.standardSubtype)
+			if err := RegisterXSubtype(tt.xSubtype, tt.standardSubtype); err != nil {
+				t.Fatalf("RegisterXSubtype(%q, %q) failed: %v", tt.xSubtype, tt.standardSubtype, err)
+			}
 
 			// Parse and normalize
 			mime, err := Parse(tt.testMimeString)
@@ -64,7 +67,9 @@ func TestRegisterXSubtypes(t *testing.T) {
 		"x-batch3": "batch3",
 	}
 
-	RegisterXSubtypes(mappings)
+	if err := RegisterXSubtypes(mappings); err != nil {
+		t.Fatalf("RegisterXSubtypes(%v) failed: %v", mappings, err)
+	}
 
 	tests := []struct {
 		mimeString      string
@@ -608,17 +613,18 @@ func TestNormalizeXSubtype_AllPredefinedMappings(t *testing.T) {
 // TestRegisterXSubtype_ThreadSafety tests thread safety of registration
 func TestRegisterXSubtype_ThreadSafety(t *testing.T) {
 	const goroutines = 100
-	done := make(chan bool, goroutines)
+	done := make(chan error, goroutines)
 
 	for i := 0; i < goroutines; i++ {
 		go func(id int) {
-			RegisterXSubtype("x-concurrent-"+string(rune(id)), "concurrent-"+string(rune(id)))
-			done <- true
+			done <- RegisterXSubtype(fmt.Sprintf("x-concurrent-%d", id), fmt.Sprintf("concurrent-%d", id))
 		}(i)
 	}
 
 	for i := 0; i < goroutines; i++ {
-		<-done
+		if err := <-done; err != nil {
+			t.Errorf("RegisterXSubtype failed: %v", err)
+		}
 	}
 }
 
@@ -687,7 +693,9 @@ func TestNormalizeXSubtype_WarmStringCache(t *testing.T) {
 // TestRegisterXSubtype_NormalizesKey tests that registrations are reachable
 // regardless of the case they were registered with.
 func TestRegisterXSubtype_NormalizesKey(t *testing.T) {
-	RegisterXSubtype("X-Mixed-Case", "VND.Mixed")
+	if err := RegisterXSubtype("X-Mixed-Case", "VND.Mixed"); err != nil {
+		t.Fatalf("RegisterXSubtype failed: %v", err)
+	}
 
 	parsed, err := Parse("application/x-mixed-case")
 	if err != nil {
@@ -697,4 +705,61 @@ func TestRegisterXSubtype_NormalizesKey(t *testing.T) {
 	if got := NormalizeXSubtype(parsed).SubType(); got != "vnd.mixed" {
 		t.Errorf("normalized subtype = %q, want %q", got, "vnd.mixed")
 	}
+}
+
+// TestRegisterXSubtype_RejectsUnusableMappings guards the regression where a
+// mapping could be installed whose substituted subtype renders a canonical
+// string [Parse] rejects, such as "text/a b" or "text/".
+func TestRegisterXSubtype_RejectsUnusableMappings(t *testing.T) {
+	tests := []struct {
+		name            string
+		xSubtype        string
+		standardSubtype string
+	}{
+		{name: "key without x- prefix", xSubtype: "javascript", standardSubtype: "javascript"},
+		{name: "empty target", xSubtype: "x-empty", standardSubtype: ""},
+		{name: "target with a space", xSubtype: "x-space", standardSubtype: "a b"},
+		{name: "target with a separator", xSubtype: "x-slash", standardSubtype: "a/b"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := RegisterXSubtype(tt.xSubtype, tt.standardSubtype); err == nil {
+				t.Errorf("RegisterXSubtype(%q, %q) = nil, want error", tt.xSubtype, tt.standardSubtype)
+			}
+		})
+	}
+
+	t.Run("rejected single mapping is not installed", func(t *testing.T) {
+		if err := RegisterXSubtype("x-rejected", "rejected token"); err == nil {
+			t.Fatal("RegisterXSubtype with an invalid target = nil, want error")
+		}
+
+		normalized := NormalizeXSubtype(MustNew("text", "x-rejected"))
+		if normalized.SubType() != "x-rejected" {
+			t.Errorf("SubType() = %q, want the unmapped source subtype", normalized.SubType())
+		}
+	})
+
+	t.Run("rejected batch installs nothing", func(t *testing.T) {
+		err := RegisterXSubtypes(map[string]string{
+			"x-batch-valid": "batch-valid",
+			"x-batch-bad":   "a b",
+		})
+		if err == nil {
+			t.Fatal("RegisterXSubtypes with an invalid target = nil, want error")
+		}
+
+		normalized := NormalizeXSubtype(MustNew("text", "x-batch-valid"))
+		if normalized.SubType() != "x-batch-valid" {
+			t.Errorf("SubType() = %q, want the unmapped source subtype", normalized.SubType())
+		}
+	})
+
+	t.Run("batch rejects keys that differ only in case", func(t *testing.T) {
+		err := RegisterXSubtypes(map[string]string{"x-case": "case", "X-CASE": "other"})
+		if err == nil {
+			t.Fatal("RegisterXSubtypes with case-duplicate keys = nil, want error")
+		}
+	})
 }

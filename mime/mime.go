@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/Tangerg/pkg/maps"
-	pkgStrings "github.com/Tangerg/pkg/strings"
 )
 
 const (
@@ -141,26 +140,26 @@ func (m *MIME) String() string {
 	return m.formatStringValue()
 }
 
-// stripQuotes removes every layer of surrounding quotes, of either quote
-// character ([pkgStrings.IsQuoted]). Single-layer [pkgStrings.UnQuote] would
-// not be idempotent, and a value that stays quoted after one pass could be
-// emptied by the next one.
+// stripQuotes removes every layer of surrounding double quotes. A single-quoted
+// run is left alone: "'" is a token character ([isToken]), so reading it as
+// quoting would rewrite a legal token. Removing one layer would not do either,
+// as a value that stays quoted after one pass could be emptied by the next one.
 func stripQuotes(value string) string {
-	for pkgStrings.IsQuoted(value) {
-		value = pkgStrings.UnQuote(value)
+	for isQuotedSpelling(value) {
+		value = value[1 : len(value)-1]
 	}
 	return value
 }
 
 // normalizeTypeComponent returns the primary type or subtype the builder
-// stores: lower-cased, with every layer of surrounding quotes removed.
+// stores: lower-cased, with every layer of surrounding double quotes removed.
 func normalizeTypeComponent(component string) string {
 	return stripQuotes(strings.ToLower(component))
 }
 
 // normalizeParamKey returns the name a parameter is stored under: lower-cased,
-// with every layer of surrounding quotes removed. Spellings that normalize to
-// the same name denote the same parameter.
+// with every layer of surrounding double quotes removed. Spellings that
+// normalize to the same name denote the same parameter.
 func normalizeParamKey(paramKey string) string {
 	return stripQuotes(strings.ToLower(paramKey))
 }

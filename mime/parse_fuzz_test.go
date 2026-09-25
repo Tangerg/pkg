@@ -48,3 +48,54 @@ func FuzzParse(f *testing.F) {
 		}
 	})
 }
+
+// FuzzBuilder feeds arbitrary components through the [Builder]. Whatever Build
+// accepts must render a canonical string that [Parse] accepts back and that
+// compares equal to the built value: a wildcard primary type paired with a
+// concrete subtype used to break exactly that.
+func FuzzBuilder(f *testing.F) {
+	seeds := []struct {
+		mimeType   string
+		subType    string
+		paramKey   string
+		paramValue string
+	}{
+		{mimeType: "text", subType: "html"},
+		{mimeType: "text", subType: "*", paramKey: "charset", paramValue: "utf-8"},
+		{mimeType: "*", subType: "*"},
+		{mimeType: "*", subType: "json"},
+		{mimeType: "", subType: "json"},
+		{mimeType: "application", subType: "vnd.api+json", paramKey: "profile", paramValue: `"a b"`},
+		{mimeType: "text", subType: "plain", paramKey: "name", paramValue: `"a\"b"`},
+		{mimeType: "text", subType: "plain", paramKey: "name"},
+		{mimeType: "text", subType: "plain", paramKey: "name", paramValue: `""`},
+		{mimeType: "text", subType: "plain", paramKey: "charset", paramValue: `"utf 8"`},
+		{mimeType: "text", subType: "plain", paramKey: "'name'", paramValue: "'a'"},
+		{},
+	}
+	for _, seed := range seeds {
+		f.Add(seed.mimeType, seed.subType, seed.paramKey, seed.paramValue)
+	}
+
+	f.Fuzz(func(t *testing.T, mimeType, subType, paramKey, paramValue string) {
+		built, err := NewBuilder().
+			WithType(mimeType).
+			WithSubType(subType).
+			WithParam(paramKey, paramValue).
+			Build()
+		if err != nil {
+			return
+		}
+
+		canonical := built.String()
+		reparsed, err := Parse(canonical)
+		if err != nil {
+			t.Fatalf("Build(%q, %q, %q, %q) produced %q, which does not parse: %v",
+				mimeType, subType, paramKey, paramValue, canonical, err)
+		}
+		if !reparsed.Equals(built) {
+			t.Fatalf("round trip of (%q, %q, %q, %q) = %q, want %q",
+				mimeType, subType, paramKey, paramValue, reparsed.String(), canonical)
+		}
+	})
+}

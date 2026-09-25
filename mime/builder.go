@@ -1,6 +1,7 @@
 package mime
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -110,14 +111,14 @@ func (b *Builder) checkParams() error {
 }
 
 // WithType sets the primary type, lower-casing the input and stripping
-// surrounding quotes.
+// surrounding double quotes.
 func (b *Builder) WithType(mimeType string) *Builder {
 	b.mime._type = normalizeTypeComponent(mimeType)
 	return b
 }
 
 // WithSubType sets the subtype, lower-casing the input and stripping
-// surrounding quotes.
+// surrounding double quotes.
 func (b *Builder) WithSubType(mimeSubType string) *Builder {
 	b.mime.subType = normalizeTypeComponent(mimeSubType)
 	return b
@@ -142,9 +143,9 @@ func (b *Builder) WithCharset(charsetValue string) *Builder {
 }
 
 // WithParam adds a parameter. The key is lower-cased and stripped of
-// surrounding quotes; an empty key is a no-op. A "charset" key is forwarded to
-// [Builder.WithCharset]. A double-quoted value is decoded and re-encoded in
-// canonical spelling; an unquoted value has to be a token, which
+// surrounding double quotes; an empty key is a no-op. A "charset" key is
+// forwarded to [Builder.WithCharset]. A double-quoted value is decoded and
+// re-encoded in canonical spelling; an unquoted value has to be a token, which
 // [Builder.Build] verifies.
 func (b *Builder) WithParam(paramKey string, paramValue string) *Builder {
 	normalizedKey := normalizeParamKey(paramKey)
@@ -196,8 +197,10 @@ func (b *Builder) FromMime(sourceMime *MIME) *Builder {
 }
 
 // Build validates the configured components and returns the assembled [MIME].
-// Empty type or subtype default to "*". An invalid token in any component
-// produces an error. The result shares no state with the builder.
+// Empty type or subtype default to "*"; a wildcard primary type is legal only
+// in "*/*", so an empty type combines only with a wildcard subtype. An invalid
+// token in any component produces an error. The result shares no state with the
+// builder.
 func (b *Builder) Build() (*MIME, error) {
 	if b.mime._type == "" {
 		b.mime._type = wildcardType
@@ -209,6 +212,14 @@ func (b *Builder) Build() (*MIME, error) {
 		b.mime.subType = wildcardType
 	} else if err := b.checkToken(b.mime.subType); err != nil {
 		return nil, err
+	}
+
+	// A wildcard primary type covers every subtype in [MIME.Includes], so it has
+	// no meaning outside "*/*". [Parse] builds through here and relies on this
+	// check: without it, "*" with a concrete subtype would render a canonical
+	// string that [Parse] rejects.
+	if b.mime._type == wildcardType && b.mime.subType != wildcardType {
+		return nil, errors.New("wildcard type is legal only in '*/*' (all mime types)")
 	}
 
 	if err := b.checkParams(); err != nil {

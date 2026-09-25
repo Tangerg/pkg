@@ -43,10 +43,11 @@
 - **retry 的饱和算术只有一个入口**:`ExponentialBackoff` / `FullJitterBackoff` 的 `BaseDelay << step` 一律走 `shiftSaturating`,`CombineDelays` 的累加走 `addSaturating`。**不要退回 `d < 0` 那种判溢出**:移位回绕成 0 或小正数时它不是负数(`BaseDelay = 1<<62`、`attempt = 2` 时 `1<<64 ≡ 0`),会静默算出 0 延迟——即无间隔重试的死循环。`CombineDelays` 同理不能拿 `MaxInt64 - d` 当上界:分量可以为负,那个减法自身就会回绕,把 -1s 这类偏移放大成一个 292 年的 sleep。
 - **`MaxBackoffStep == 0` 只有一个含义**:uncapped,由 `cappedStep` 单点决定,`NewResultRetrier` 不再改写该字段。历史上 0 同时表示"自动派生"与"派生结果无指数可用",两个 delay 函数又拿 `MaxBackoffStep > 0` 当封顶开关,于是退化输入下反而把保护关掉了——这正是回绕能漏出去的原因。溢出改由饱和算术负责,不再需要派生上限。
 - **retry 测试不得并行**:`retry` 包用替换 `randInt64N` 的方式做确定性断言,`t.Parallel` 会与替换互相干扰。
+- **mime 的通配类型与引号各只有一个归属**:通配主类型只允许 `*/*`,`Builder.Build` 是唯一校验点(`Parse` 经它校验)——否则 `New("")` / `WithSubType` 能组合出 `*/html` 这类 `String()` 回不去 `Parse` 的值,且 `Includes` 会把它当成覆盖一切。引号只认双引号(`isQuotedSpelling`),单引号是合法 token 字符:别把 `normalizeTypeComponent` / `normalizeParamKey` 改回 `strings.IsQuoted`,它连单引号一起剥,会静默改写合法 token。`RegisterXSubtype` / `RegisterXSubtypes` 返回 error 并前置校验(键须带 `x-` 前缀、目标须是非空 token),因为映射目标会被替换进 subtype——不校验就能造出 `text/a b` 这种解析不回去的值。
 
 ## 改动后必跑
 
 - `gofmt -l .`、`go vet ./...`、`go test -race ./...`(并发包尤其)。
 - `./scripts/check-imports.sh`(依赖闭包护栏:只允许 stdlib 与 go.mod 声明的三方库,且不 import 业务模块)。
 - 改 `xml` / `json` 解析器:跑对应 `-fuzz` 目标各数秒。
-- 改 `mime` 的 `Parse` / 引号 / 参数路径:跑 `go test -run=XXX -fuzz=FuzzParse -fuzztime=15s ./mime/`(`mime/testdata/fuzz` 里的历史 crasher 会随 `go test` 一起回归)。
+- 改 `mime` 的 `Parse` / 引号 / 参数路径:跑 `go test -run=XXX -fuzz=FuzzParse -fuzztime=15s ./mime/` 与 `go test -run=XXX -fuzz=FuzzBuilder -fuzztime=15s ./mime/`(`mime/testdata/fuzz` 里的历史 crasher 会随 `go test` 一起回归)。

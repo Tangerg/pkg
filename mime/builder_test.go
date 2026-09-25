@@ -695,11 +695,28 @@ func TestBuilder_Build(t *testing.T) {
 			errMsg:  "invalid character",
 		},
 		{
-			name: "default wildcard type",
+			name: "wildcard primary type with a concrete subtype",
 			setup: func(b *Builder) *Builder {
 				return b.WithSubType("html")
 			},
-			wantErr: false,
+			wantErr: true,
+			errMsg:  "wildcard type is legal only in '*/*'",
+		},
+		{
+			name: "explicit wildcard primary type with a concrete subtype",
+			setup: func(b *Builder) *Builder {
+				return b.WithType("*").WithSubType("json")
+			},
+			wantErr: true,
+			errMsg:  "wildcard type is legal only in '*/*'",
+		},
+		{
+			name: "wildcard primary type with a subtype wildcard suffix",
+			setup: func(b *Builder) *Builder {
+				return b.WithType("*").WithSubType("*+json")
+			},
+			wantErr: true,
+			errMsg:  "wildcard type is legal only in '*/*'",
 		},
 		{
 			name: "default wildcard subtype",

@@ -29,7 +29,9 @@ var (
 var ErrorInvalidMimeType = errors.New("invalid mime type")
 
 // New returns a [MIME] with the given primary type and subtype and no
-// parameters. An empty component defaults to "*", as in [Builder.Build].
+// parameters. An empty component defaults to "*", as in [Builder.Build], so an
+// empty primary type combines only with a wildcard subtype: a wildcard type is
+// legal only in "*/*".
 func New(mimeType string, subType string) (*MIME, error) {
 	return NewBuilder().
 		WithType(mimeType).
@@ -84,10 +86,6 @@ func Parse(mimeString string) (*MIME, error) {
 	}
 	if subType == "" {
 		return nil, fmt.Errorf("%w: does not contain subtype after '/'", ErrorInvalidMimeType)
-	}
-
-	if primaryType == wildcardType && subType != wildcardType {
-		return nil, fmt.Errorf("%w: wildcard type is legal only in '*/*' (all mime types)", ErrorInvalidMimeType)
 	}
 
 	parameterMap := maps.NewHashMap[string, string]()

@@ -431,7 +431,7 @@ func parseAttrs(startEle string) ([]Attr, error) {
 		if quote != '"' && quote != '\'' {
 			return nil, fmt.Errorf("attribute %q value must be quoted", attrName)
 		}
-		pos++ // Skip opening quote
+		pos++
 
 		valueStart := pos
 
@@ -444,7 +444,7 @@ func parseAttrs(startEle string) ([]Attr, error) {
 		}
 
 		attrValue := attrStr[valueStart:pos]
-		pos++ // Skip closing quote
+		pos++
 
 		attrs = append(attrs, Attr{
 			Name:  Name{Local: attrName},
@@ -471,18 +471,15 @@ func extractElementName(eleContent string) Name {
 		return Name{}
 	}
 
-	// Start after "<" or "</"
 	start := 1
 	if eleContent[start] == '/' {
 		start++
 	}
 
-	// Skip leading whitespace
 	for start < n && unicode.IsSpace(rune(eleContent[start])) {
 		start++
 	}
 
-	// Find end of element name
 	end := start
 	for end < n {
 		c := eleContent[end]
@@ -661,7 +658,7 @@ func isValidAttributes(attrStr string) bool {
 		if pos >= len(attrStr) || attrStr[pos] != '=' {
 			return false
 		}
-		pos++ // Skip '='
+		pos++
 
 		for pos < len(attrStr) && unicode.IsSpace(rune(attrStr[pos])) {
 			pos++
@@ -675,14 +672,13 @@ func isValidAttributes(attrStr string) bool {
 		if quote != '"' && quote != '\'' {
 			return false
 		}
-		pos++ // Skip opening quote
+		pos++
 
-		// Find closing quote
 		foundClosingQuote := false
 		for pos < len(attrStr) {
 			if attrStr[pos] == quote {
 				foundClosingQuote = true
-				pos++ // Skip closing quote
+				pos++
 				break
 			}
 			pos++
@@ -703,7 +699,6 @@ func isNameString(s string) bool {
 		return false
 	}
 
-	// Decode first rune
 	c, n := utf8.DecodeRuneInString(s)
 	if c == utf8.RuneError && n == 1 {
 		return false

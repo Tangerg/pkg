@@ -23,8 +23,10 @@
 //   - [HashMap] and [LinkedMap] are NOT safe for concurrent use;
 //     wrap with [SyncMap] (or pick [StdSyncMap]) when sharing
 //     across goroutines.
-//   - Concurrent maps snapshot during iteration; mutations made
-//     after Iter() starts are not observed by that iterator.
+//   - [SyncMap] snapshots before iterating, so mutations made after
+//     Iter() starts are not observed by that iterator. [StdSyncMap]
+//     does not snapshot: its iterator walks the live [sync.Map], so a
+//     concurrent write may or may not be observed.
 //
 // Use Go's native `map[K]V` directly when none of these flavors add
 // value — this package exists for code that wants the Map interface,

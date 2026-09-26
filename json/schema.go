@@ -103,8 +103,9 @@ func MustMapDefSchemaOf(v any) map[string]any {
 }
 
 // generateSchema reflects a *jsonschema.Schema for v with the given
-// configuration. Struct values are always emitted with ExpandedStruct
-// set so the result is a single, self-contained object.
+// configuration. When v — after dereferencing at most one pointer — is a struct,
+// ExpandedStruct is forced on so the result is a single, self-contained object
+// instead of a set of references.
 func generateSchema(v any, cfg SchemaConfig) (*jsonschema.Schema, error) {
 	if v == nil {
 		return nil, errors.New("value must not be nil")

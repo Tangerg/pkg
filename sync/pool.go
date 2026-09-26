@@ -100,6 +100,10 @@ func PoolOfWorkerpool(pool *workerpool.WorkerPool) Pool {
 		if pool.Stopped() {
 			return workerpool.ErrStopped
 		}
+		// workerpool.Submit panics with ErrStopped when the pool stops
+		// between the check above and the enqueue, so recover that race
+		// into the same error rather than crashing. Task panics are
+		// unaffected: the task runs in a worker goroutine, not here.
 		defer func() {
 			if r := recover(); r != nil {
 				perr, ok := r.(error)

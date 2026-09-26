@@ -102,7 +102,7 @@ func First[S ~[]E, E any](s S) (E, bool) {
 	return At(s, 0)
 }
 
-// FirstOr returns the first element of s, or or if s is empty.
+// FirstOr is like [First] but returns or when s is empty.
 func FirstOr[S ~[]E, E any](s S, or E) E {
 	return AtOr(s, 0, or)
 }
@@ -112,7 +112,7 @@ func Last[S ~[]E, E any](s S) (E, bool) {
 	return At(s, -1)
 }
 
-// LastOr returns the last element of s, or or if s is empty.
+// LastOr is like [Last] but returns or when s is empty.
 func LastOr[S ~[]E, E any](s S, or E) E {
 	return AtOr(s, -1, or)
 }

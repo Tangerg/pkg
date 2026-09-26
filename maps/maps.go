@@ -31,7 +31,8 @@ type Map[K comparable, V any] interface {
 	// Clear removes every entry.
 	Clear()
 
-	// PutAll copies every mapping of other into this map.
+	// PutAll copies every mapping of other into this map. A nil other is
+	// ignored by [SyncMap.PutAll] and panics in the other implementations.
 	PutAll(other Map[K, V])
 
 	// Keys returns all keys as a snapshot that does not alias the map.
@@ -89,12 +90,12 @@ type Map[K comparable, V any] interface {
 	// insertion order.
 	Iter() iter.Seq2[K, V]
 
-	// IterKeys returns an iterator that yields keys only, in the same order as
-	// Iter.
+	// IterKeys returns an iterator that yields keys only, following the same
+	// ordering rule as Iter.
 	IterKeys() iter.Seq[K]
 
-	// IterValues returns an iterator that yields values only, in the same order
-	// as Iter.
+	// IterValues returns an iterator that yields values only, following the
+	// same ordering rule as Iter.
 	IterValues() iter.Seq[V]
 
 	// Clone returns an independent copy of this map with the same entries. The

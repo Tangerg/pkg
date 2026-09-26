@@ -118,6 +118,9 @@ func (r *Renderer[T]) MustRender() string {
 // RequireVariables returns an error listing names whose direct textual
 // placeholder is absent from the template. Matching is intentionally literal;
 // nested expressions such as "{{.User.Name}}" are not direct placeholders.
+//
+// A name that is empty or carries surrounding whitespace is reported as invalid
+// before any placeholder is looked up.
 func (r *Renderer[T]) RequireVariables(names ...string) error {
 	missing := make([]string, 0, len(names))
 	for _, name := range names {

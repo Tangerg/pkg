@@ -10,7 +10,8 @@ import (
 // concurrent use; wrap it with [SyncMap] to share it across goroutines.
 type HashMap[K comparable, V any] map[K]V
 
-// NewHashMap returns an empty HashMap with capacity for size entries.
+// NewHashMap returns an empty HashMap with capacity for size entries. Only the
+// first value of size is used, and a non-positive one allocates no capacity.
 func NewHashMap[K comparable, V any](size ...int) HashMap[K, V] {
 	c, _ := pkgSlices.First(size)
 	if c <= 0 {

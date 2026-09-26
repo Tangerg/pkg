@@ -14,11 +14,10 @@ type NumericType interface {
 }
 
 // Abs returns the absolute value of x for any [NumericType]. Floating
-// point inputs delegate to math.Abs; integers use the standard
-// branchless idiom. Behavior on signed-integer minimum (e.g.
-// math.MinInt64) is implementation-defined: the bit pattern wraps and
-// the returned value is the same MinInt64 — guard against that case
-// with [MultiplyExact] when needed.
+// point inputs delegate to math.Abs; integers are negated when negative.
+// Negating a signed-integer minimum (math.MinInt64 and the like) overflows,
+// and Go defines signed overflow as the wrapping bit pattern, so Abs returns
+// that minimum unchanged. [MultiplyExact] detects the case when needed.
 func Abs[T NumericType](x T) T {
 	switch v := any(x).(type) {
 	case float32:

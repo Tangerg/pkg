@@ -73,8 +73,11 @@ func (c CamelCase) SplitToLower() []string { return c.SplitWith(strings.ToLower)
 // SplitToUpper splits c and upper-cases each word.
 func (c CamelCase) SplitToUpper() []string { return c.SplitWith(strings.ToUpper) }
 
-// ToSnakeCase returns the snake_case form of c. Adjacent runs of
-// underscores in the source are collapsed; empty parts are skipped.
+// ToSnakeCase returns the snake_case form of c: every word is lower-cased and
+// the words are joined with "_". A lone "_" between words is dropped, while a
+// longer run of underscores survives as a word of its own and is therefore
+// re-joined with one more underscore on each side ("get__user" gives
+// "get____user").
 //
 // Example:
 //

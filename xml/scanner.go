@@ -424,8 +424,8 @@ func (p *StreamScanner) isInScope() bool {
 	return p.stack.len() > 0
 }
 
-// scopeFull reports whether writing add more bytes into buffer would reach the
-// effective cap of scope. A non-positive cap is disabled.
+// scopeFull reports whether appending add more bytes to buffer would reach or
+// exceed the effective cap of scope. A non-positive cap is disabled.
 func scopeFull(scope *elementScope, buffer *bytes.Buffer, add int) bool {
 	return scope.limit > 0 && buffer.Len()+add >= scope.limit
 }

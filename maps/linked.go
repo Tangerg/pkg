@@ -22,7 +22,9 @@ type LinkedMap[K comparable, V any] struct {
 	tail  *mapNode[K, V]
 }
 
-// NewLinkedMap returns an empty LinkedMap with capacity for size entries.
+// NewLinkedMap returns an empty LinkedMap with capacity for size entries. Only
+// the first value of size is used, and a non-positive one allocates no
+// capacity.
 func NewLinkedMap[K comparable, V any](size ...int) *LinkedMap[K, V] {
 	c, _ := pkgSlices.First(size)
 	if c <= 0 {

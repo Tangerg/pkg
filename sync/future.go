@@ -18,8 +18,10 @@ var (
 	ErrFutureTimedOut = errors.New("future timed out")
 )
 
-// FutureState identifies the lifecycle stage of a Future. The
-// transitions are: Created → Running → (Succeeded | Failed | Canceled).
+// FutureState identifies the lifecycle stage of a Future. Created moves to
+// Running when [FutureTask.Run] starts the task, and Running ends in Succeeded,
+// Failed, or Cancelled. Cancel reaches Cancelled from Created as well, so a
+// future cancelled before it ran never passes through Running.
 type FutureState int32
 
 const (
@@ -50,8 +52,9 @@ func (s FutureState) int32() int32 { return int32(s) }
 // Future represents a typed asynchronous computation producing a value
 // of type V.
 type Future[V any] interface {
-	// Cancel attempts to cancel execution. If mayInterruptIfRunning is
-	// true and the task is running, the interrupt channel is closed.
+	// Cancel attempts to cancel execution whether or not the task has
+	// started; a future that already completed cannot be canceled. When
+	// mayInterruptIfRunning is true the interrupt channel is closed.
 	// Returns true if this call performed the cancellation.
 	Cancel(mayInterruptIfRunning bool) bool
 

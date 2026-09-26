@@ -9,6 +9,9 @@ import (
 // before a "\n" is dropped and a trailing newline does not yield a final
 // empty line. Unlike a bufio.Scanner it has no fixed token limit, so a
 // long line is returned intact rather than silently dropped.
+//
+// Input that is empty or entirely whitespace yields one empty line, so the
+// result never has fewer than one entry.
 func Lines(s string) []string {
 	if strings.TrimSpace(s) == "" {
 		return []string{""}
@@ -90,9 +93,9 @@ func TrimAdjacentBlankLines(s string) string {
 	return sb.String()
 }
 
-// DeleteTopLines removes n lines from the start of s. If n is
-// non-positive, s is returned unchanged. If s has at most n lines, the
-// empty string is returned.
+// DeleteTopLines removes n lines from the start of s. If n is non-positive, or
+// s is empty or entirely whitespace, s is returned unchanged. If s has at most
+// n lines, the empty string is returned.
 func DeleteTopLines(s string, n int) string {
 	if n <= 0 || strings.TrimSpace(s) == "" {
 		return s

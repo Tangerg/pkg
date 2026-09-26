@@ -14,9 +14,9 @@ const (
 	TBSuffix = "TB"
 )
 
-// DataUnit pairs a single-unit [DataSize] with its textual suffix.
-// It is produced by [NewUnitFromSuffix] and used to format or parse
-// human-readable byte sizes.
+// DataUnit pairs the [DataSize] of one unit with its textual suffix, so a
+// caller can both name a unit and convert a count of it into bytes.
+// It is produced by [NewUnitFromSuffix].
 type DataUnit struct {
 	size   DataSize
 	suffix string

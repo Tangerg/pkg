@@ -718,7 +718,9 @@ func (s *StdSyncMap[K, V]) RemoveIf(key K, value V) bool {
 }
 
 // Replace replaces the value for key only when key is present, returning the
-// previous value and whether the replacement happened.
+// previous value and whether the replacement happened. A failed replacement
+// reports the value now mapped to key, or the zero value when key is absent,
+// so only the boolean distinguishes success from failure.
 func (s *StdSyncMap[K, V]) Replace(key K, value V) (V, bool) {
 	if oldValue, exists := s.m.Load(key); exists {
 		current := unwrap[V](oldValue)

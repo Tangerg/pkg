@@ -2,6 +2,7 @@ package mime
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -877,8 +878,25 @@ func TestParse_QuotedParameters(t *testing.T) {
 			wantString: `text/plain;boundary="a;b"`,
 		},
 		{
+			name:       "tab inside quotes is accepted",
+			mimeString: "text/plain; name=\"a\tb\"",
+			paramKey:   "name",
+			paramValue: "a\tb",
+			wantString: "text/plain;name=\"a\tb\"",
+		},
+		{
 			name:       "unquoted value with space is rejected",
 			mimeString: `text/plain; name=a b`,
+			wantError:  true,
+		},
+		{
+			name:       "quoted value with a line feed is rejected",
+			mimeString: "text/plain; name=\"a\nb\"",
+			wantError:  true,
+		},
+		{
+			name:       "quoted value with a folded header line is rejected",
+			mimeString: "text/plain; name=\"a\r\nX-Injected: yes\"",
 			wantError:  true,
 		},
 	}
@@ -977,6 +995,86 @@ func TestParse_SingleQuotesAreTokens(t *testing.T) {
 				if got, ok := parsed.Param(tt.wantParam); !ok || got != tt.wantValue {
 					t.Errorf("Param(%q) = (%q, %v), want (%q, true)", tt.wantParam, got, ok, tt.wantValue)
 				}
+			}
+
+			reparsed, err := Parse(parsed.String())
+			if err != nil {
+				t.Fatalf("Parse(%q) failed: %v", parsed.String(), err)
+			}
+			if !reparsed.Equals(parsed) {
+				t.Errorf("round trip = %q, want %q", reparsed.String(), parsed.String())
+			}
+		})
+	}
+}
+
+// TestParse_UnterminatedQuotes verifies that a quoted-string the input never
+// closes is reported instead of repaired: the split already read the separators
+// of every later parameter as part of that value, so a repaired result would
+// silently drop or merge parameters.
+func TestParse_UnterminatedQuotes(t *testing.T) {
+	mimeStrings := []string{
+		`text/plain; name="a`,
+		`text/plain; name="a;charset=UTF-8`,
+		`text/plain; name="a;charset="UTF-8"`,
+		`text/plain; name="a""`,
+		`text/"plain`,
+	}
+
+	for _, mimeString := range mimeStrings {
+		t.Run(mimeString, func(t *testing.T) {
+			parsed, err := Parse(mimeString)
+			if err == nil {
+				t.Fatalf("Parse(%q) = %q, want error", mimeString, parsed.String())
+			}
+			if !errors.Is(err, ErrorInvalidMimeType) {
+				t.Errorf("Parse(%q) error = %v, want it to wrap %v", mimeString, err, ErrorInvalidMimeType)
+			}
+			if !strings.Contains(err.Error(), "unterminated quoted string") {
+				t.Errorf("Parse(%q) error = %v, want it to name the unterminated quote", mimeString, err)
+			}
+		})
+	}
+}
+
+// TestParse_ClosedQuotes guards the boundary of the unterminated-quote report:
+// a value whose quotes balance still parses, including one that ends with an
+// escaped quote.
+func TestParse_ClosedQuotes(t *testing.T) {
+	tests := []struct {
+		name       string
+		mimeString string
+		paramKey   string
+		paramValue string
+	}{
+		{
+			name:       "escaped trailing quote",
+			mimeString: `text/plain; name="a\""`,
+			paramKey:   "name",
+			paramValue: `a"`,
+		},
+		{
+			name:       "escaped quote inside and closed",
+			mimeString: `text/plain; name="a\";b"`,
+			paramKey:   "name",
+			paramValue: `a";b`,
+		},
+		{
+			name:       "quoted value followed by a parameter",
+			mimeString: `text/plain; boundary="a;b"; charset="UTF-8"`,
+			paramKey:   "boundary",
+			paramValue: "a;b",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.mimeString)
+			if err != nil {
+				t.Fatalf("Parse(%q) failed: %v", tt.mimeString, err)
+			}
+			if got, ok := parsed.Param(tt.paramKey); !ok || got != tt.paramValue {
+				t.Errorf("Param(%q) = (%q, %v), want (%q, true)", tt.paramKey, got, ok, tt.paramValue)
 			}
 
 			reparsed, err := Parse(parsed.String())

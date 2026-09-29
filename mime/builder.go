@@ -86,18 +86,33 @@ func (b *Builder) checkToken(token string) error {
 }
 
 // checkParam validates a parameter key/value pair. The key must be a token; the
-// value must be a token or a double-quoted string whose contents are accepted
-// without further checks.
+// value must be a token or a double-quoted string. A quoted value is otherwise
+// accepted as written, except for line breaks: RFC 2045 excludes CR and LF from
+// qtext, and [MIME.String] emits the spelling verbatim, so a value carrying one
+// would put a line break into whatever a caller renders it into.
 func (b *Builder) checkParam(paramKey string, paramValue string) error {
 	if err := b.checkToken(paramKey); err != nil {
 		return err
 	}
 
 	if isQuotedSpelling(paramValue) {
+		if char, hasLineBreak := lineBreakChar(paramValue); hasLineBreak {
+			return fmt.Errorf("invalid character %q in quoted value %q", char, paramValue)
+		}
 		return nil
 	}
 
 	return b.checkToken(paramValue)
+}
+
+// lineBreakChar returns the first CR or LF in value and whether it holds one.
+func lineBreakChar(value string) (byte, bool) {
+	for i := 0; i < len(value); i++ {
+		if value[i] == '\r' || value[i] == '\n' {
+			return value[i], true
+		}
+	}
+	return 0, false
 }
 
 // checkParams validates every parameter currently set on the builder.
@@ -145,8 +160,8 @@ func (b *Builder) WithCharset(charsetValue string) *Builder {
 // WithParam adds a parameter. The key is lower-cased and stripped of
 // surrounding double quotes; an empty key is a no-op. A "charset" key is
 // forwarded to [Builder.WithCharset]. A double-quoted value is decoded and
-// re-encoded in canonical spelling; an unquoted value has to be a token, which
-// [Builder.Build] verifies.
+// re-encoded in canonical spelling; an unquoted value has to be a token, and a
+// quoted one may hold no line break. [Builder.Build] verifies both.
 func (b *Builder) WithParam(paramKey string, paramValue string) *Builder {
 	normalizedKey := normalizeParamKey(paramKey)
 	if normalizedKey == "" {
@@ -191,7 +206,7 @@ func (b *Builder) FromMime(sourceMime *MIME) *Builder {
 
 	b.mime._type = sourceMime._type
 	b.mime.subType = sourceMime.subType
-	b.mime.params = sourceMime.params.Clone().(maps.HashMap[string, string])
+	b.mime.params = cloneParams(sourceMime.params)
 
 	return b
 }
@@ -227,7 +242,7 @@ func (b *Builder) Build() (*MIME, error) {
 	}
 
 	built := *b.mime
-	built.params = b.mime.params.Clone().(maps.HashMap[string, string])
+	built.params = cloneParams(b.mime.params)
 	built.cachedString = built.formatStringValue()
 
 	return &built, nil

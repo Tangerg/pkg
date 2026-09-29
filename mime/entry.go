@@ -54,9 +54,15 @@ func MustNew(mimeType string, subType string) *MIME {
 // "=", a parameter without a name, or a repeated parameter name (compared
 // case-insensitively) returns [ErrorInvalidMimeType]. Empty segments, such as a
 // trailing ";", and empty parameter values are accepted; an empty charset value
-// sets no parameter, while any other parameter keeps its empty value.
+// sets no parameter, while any other parameter keeps its empty value. A quoted
+// value the input never closes, and one that holds a line break, are reported
+// the same way.
 func Parse(mimeString string) (*MIME, error) {
-	segments := paramSegments(mimeString)
+	segments, unterminatedQuote := paramSegments(mimeString)
+	if unterminatedQuote {
+		return nil, fmt.Errorf("%w: unterminated quoted string in %q", ErrorInvalidMimeType, mimeString)
+	}
+
 	typeSubtypeString := strings.TrimSpace(segments[0])
 
 	if typeSubtypeString == "" {
@@ -126,9 +132,11 @@ func Parse(mimeString string) (*MIME, error) {
 // paramSegments splits a MIME string on the ';' separators outside quoted
 // strings, whose first segment is the type/subtype part. A backslash inside a
 // quoted string escapes the next character, so an escaped quote does not end
-// the value.
-func paramSegments(mimeString string) []string {
-	segments := make([]string, 0, 3)
+// the value. The second result reports a quoted string the input leaves open:
+// the split then read the separators of every parameter after it as part of
+// that value, so the input has to be reported rather than repaired.
+func paramSegments(mimeString string) (segments []string, unterminatedQuote bool) {
+	segments = make([]string, 0, 3)
 	segmentStart := 0
 	isQuoted := false
 
@@ -144,7 +152,7 @@ func paramSegments(mimeString string) []string {
 		}
 	}
 
-	return append(segments, mimeString[segmentStart:])
+	return append(segments, mimeString[segmentStart:]), isQuoted
 }
 
 // Detect returns the MIME type inferred from the content of dataBytes. The

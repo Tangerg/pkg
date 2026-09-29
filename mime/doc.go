@@ -10,7 +10,9 @@
 // charset values upper-cased; accessors such as [MIME.Param] report parameter
 // values with their quoting removed. A [MIME] returned by a constructor is
 // immutable and safe for concurrent use, and [MIME.String] renders it with
-// parameters in ascending key order.
+// parameters in ascending key order. Because that rendering emits a quoted
+// value as written, a quoted parameter value may hold no line break, and a
+// quoted-string the input never closes is reported rather than repaired.
 //
 // [MIME] exposes component accessors ([MIME.Type], [MIME.SubType],
 // [MIME.Charset], [MIME.Param]), comparison helpers such as [MIME.Equals],

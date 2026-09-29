@@ -244,6 +244,30 @@ func TestBuilder_checkParam(t *testing.T) {
 			paramValue: "value",
 			wantErr:    false,
 		},
+		{
+			name:       "quoted value with a tab",
+			paramKey:   "title",
+			paramValue: "\"annual\treport\"",
+			wantErr:    false,
+		},
+		{
+			name:       "quoted value with a line feed",
+			paramKey:   "title",
+			paramValue: "\"annual\nreport\"",
+			wantErr:    true,
+		},
+		{
+			name:       "quoted value with a carriage return",
+			paramKey:   "title",
+			paramValue: "\"annual\rreport\"",
+			wantErr:    true,
+		},
+		{
+			name:       "quoted value with a folded header line",
+			paramKey:   "title",
+			paramValue: "\"annual\r\nX-Injected: yes\"",
+			wantErr:    true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -690,6 +714,25 @@ func TestBuilder_Build(t *testing.T) {
 			setup: func(b *Builder) *Builder {
 				return b.WithType("text").WithSubType("html").
 					WithParam("key", "val ue")
+			},
+			wantErr: true,
+			errMsg:  "invalid character",
+		},
+		{
+			// A quoted value is emitted verbatim, so a line break inside one
+			// would reach whatever a caller renders the value into.
+			name: "quoted param value with a line break",
+			setup: func(b *Builder) *Builder {
+				return b.WithType("text").WithSubType("html").
+					WithParam("key", "\"a\r\nX-Injected: yes\"")
+			},
+			wantErr: true,
+			errMsg:  "invalid character",
+		},
+		{
+			name: "quoted charset with a line break",
+			setup: func(b *Builder) *Builder {
+				return b.WithType("text").WithSubType("html").WithCharset("\"utf\n8\"")
 			},
 			wantErr: true,
 			errMsg:  "invalid character",

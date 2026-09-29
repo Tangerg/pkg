@@ -203,6 +203,18 @@ func TestMIME_Param(t *testing.T) {
 			expectedValue: "",
 			expectedOk:    false,
 		},
+		{
+			name:          "key with different casing",
+			paramKey:      "Charset",
+			expectedValue: "UTF-8",
+			expectedOk:    true,
+		},
+		{
+			name:          "key with surrounding double quotes",
+			paramKey:      `"charset"`,
+			expectedValue: "UTF-8",
+			expectedOk:    true,
+		},
 	}
 
 	for _, tt := range tests {

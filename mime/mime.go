@@ -112,8 +112,11 @@ func (m *MIME) Charset() string {
 }
 
 // Param returns the decoded value of the named parameter and whether it is set.
+// The name is normalized the way [Builder.WithParam] normalizes it — lower-cased,
+// with surrounding double quotes removed — so every spelling of a parameter name
+// finds the value.
 func (m *MIME) Param(paramKey string) (string, bool) {
-	paramValue, ok := m.params.Get(paramKey)
+	paramValue, ok := m.params.Get(normalizeParamKey(paramKey))
 	return decodeParamValue(paramValue), ok
 }
 
@@ -447,9 +450,20 @@ func (m *MIME) Clone() *MIME {
 	}
 
 	cloned := *m
-	cloned.params = m.params.Clone().(maps.HashMap[string, string])
+	cloned.params = cloneParams(m.params)
 
 	return &cloned
+}
+
+// cloneParams returns an independent copy of params. [maps.HashMap.Clone]
+// reports its result as the [maps.Map] interface, which callers holding the
+// concrete field type would have to assert back.
+func cloneParams(params maps.HashMap[string, string]) maps.HashMap[string, string] {
+	cloned := maps.NewHashMap[string, string](params.Size())
+	for paramKey, paramValue := range params {
+		cloned.Put(paramKey, paramValue)
+	}
+	return cloned
 }
 
 // withSubType returns a copy of m with subType replaced, without validation.
